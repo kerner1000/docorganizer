@@ -26,12 +26,17 @@ import anthropic
 import xattr as xattr_lib
 from dotenv import load_dotenv
 
-from docorganizer.config import ArchiveConfig, ArchiveContext, load_config
+from docorganizer.config import ArchiveConfig, ArchiveContext, date_to_subfolder, load_config
 from docorganizer.extractor import (
     SUPPORTED_EXTENSIONS,
     ExtractionError,
     UnsupportedFileType,
     extract_text,
+)
+from docorganizer.translator import (
+    TranslationError,
+    detect_language,
+    translate_document,
 )
 from docorganizer.validator import (
     build_sender_registry,
@@ -62,16 +67,26 @@ class Proposal:
     confidence: str  # High, Medium, Low
     notes: str
     status: str = "proposed"  # proposed, approved, corrected, skipped
+    translated_path: Path | None = None  # companion translated document
 
     @property
     def filename(self) -> str:
-        return (
-            f"{self.date} - {self.sender} - {self.topic}"
-            f" - {self.person}{self.original_path.suffix}"
-        )
+        base = f"{self.date} - {self.sender} - {self.topic}"
+        if self.person:
+            base += f" - {self.person}"
+        return base + self.original_path.suffix
+
+    @property
+    def translated_filename(self) -> str | None:
+        """Filename for the translated companion, or None if no translation."""
+        if self.translated_path is None:
+            return None
+        lang_tag = self.translated_path.stem.rsplit("[", 1)[-1].rstrip("]").strip()
+        stem = Path(self.filename).stem
+        return f"{stem} [{lang_tag}]{self.original_path.suffix}"
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "original_path": str(self.original_path),
             "sender": self.sender,
             "topic": self.topic,
@@ -86,14 +101,18 @@ class Proposal:
             "status": self.status,
             "proposed_filename": self.filename,
         }
+        if self.translated_path is not None:
+            d["translated_path"] = str(self.translated_path)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Proposal":
+        translated = d.get("translated_path")
         return cls(
             original_path=Path(d["original_path"]),
             sender=d["sender"],
             topic=d["topic"],
-            person=d["person"],
+            person=d.get("person", ""),
             date=d["date"],
             country=d["country"],
             folder_topic=d["folder_topic"],
@@ -102,6 +121,7 @@ class Proposal:
             confidence=d["confidence"],
             notes=d["notes"],
             status=d.get("status", "approved"),
+            translated_path=Path(translated) if translated else None,
         )
 
 
@@ -129,12 +149,22 @@ class DuplicateFile:
 # ── Step 1: SCAN ─────────────────────────────────────────────────────────────
 
 
+def _is_translation_companion(path: Path, config: ArchiveConfig) -> bool:
+    """Check if a file looks like a translated companion (e.g. 'doc [EN].pdf')."""
+    if not config.translation_enabled:
+        return False
+    lang_tag = config.translation_target.split("-")[0]
+    return path.stem.endswith(f" [{lang_tag}]")
+
+
 def scan_inbox(ctx: ArchiveContext) -> list[Path]:
     """List files in inbox, sorted by creation date, return oldest MAX_FILES_PER_RUN."""
     files = [
         f
         for f in ctx.inbox.iterdir()
-        if f.is_file() and not f.name.startswith(".")
+        if f.is_file()
+        and not f.name.startswith(".")
+        and not _is_translation_companion(f, ctx.config)
     ]
     files.sort(key=lambda f: f.stat().st_birthtime)
     total = len(files)
@@ -228,6 +258,8 @@ class Extraction:
     path: Path
     text: str | None = None
     error: str | None = None
+    translated_path: Path | None = None  # companion translated document
+    source_language: str | None = None  # detected language code (e.g. "LV")
 
     @property
     def ok(self) -> bool:
@@ -247,6 +279,70 @@ def extract_all(files: list[Path]) -> list[Extraction]:
             results.append(Extraction(path=f, error=str(e)))
             print(f"FAILED — {e}")
     return results
+
+
+# ── Step 2.5: TRANSLATE ─────────────────────────────────────────────────────
+
+
+def translate_all(
+    extractions: list[Extraction], ctx: ArchiveContext,
+) -> None:
+    """Detect language and translate foreign-language documents via DeepL.
+
+    Modifies extractions in-place: sets ``translated_path``,
+    ``source_language``, and replaces ``text`` with translated content
+    so that downstream classification works from English text.
+    """
+    if not ctx.config.translation_enabled:
+        return
+
+    import deepl as deepl_lib
+
+    auth_key = os.getenv("DEEPL_API_KEY")
+    if not auth_key:
+        print("  Warning: DEEPL_API_KEY not set — skipping translation.")
+        return
+
+    translator = deepl_lib.Translator(auth_key)
+    sources_upper = {s.upper() for s in ctx.config.translation_sources}
+
+    for ext in extractions:
+        if not ext.ok:
+            continue
+
+        try:
+            detected = detect_language(ext.text, ctx.config.translation_target, translator)
+        except Exception as exc:
+            print(f"  Warning: language detection failed for {ext.path.name}: {exc}")
+            continue
+
+        if not detected or detected.upper() not in sources_upper:
+            continue
+
+        ext.source_language = detected.upper()
+        print(
+            f"  Translating: {ext.path.name} "
+            f"({ext.source_language} → {ctx.config.translation_target}) ... ",
+            end="", flush=True,
+        )
+
+        try:
+            translated_path = translate_document(
+                ext.path, ctx.config.translation_target, translator,
+            )
+            ext.translated_path = translated_path
+
+            # Re-extract text from the translated document for classification
+            translated_text = extract_text(translated_path)
+            ext.text = translated_text
+            print("OK")
+        except TranslationError as exc:
+            print(f"FAILED — {exc}")
+            print(f"    (original text will be used for classification)")
+        except (ExtractionError, UnsupportedFileType) as exc:
+            # Document translated but text extraction from translation failed;
+            # keep the translated file but use original text for classification.
+            print(f"OK (translated file saved, but text re-extraction failed: {exc})")
 
 
 # ── Step 3: PROPOSE ──────────────────────────────────────────────────────────
@@ -290,7 +386,6 @@ def _build_prompt(
     text: str, existing_structure: dict, config: ArchiveConfig,
 ) -> str:
     """Build the full classification prompt for the Claude API call."""
-    known_people = ", ".join(f'"{name}"' for name in config.people.keys())
     tags_block = "\n".join(
         f"- {name}: {desc}" for name, desc in config.tags.items()
     )
@@ -311,8 +406,22 @@ def _build_prompt(
             'Always use "none".'
         )
 
+    if config.use_person:
+        known_people = ", ".join(f'"{name}"' for name in config.people.keys())
+        person_json = '"person": "...", '
+        person_field = (
+            f"- Person: who the document primarily concerns (first name only). "
+            f"Known people: {known_people}. "
+            f'Use "Unknown" if no specific person applies or can be identified.\n'
+        )
+        naming_convention = "[Date] - [Sender] - [Topic] - [Person].[ext]"
+    else:
+        person_json = ""
+        person_field = ""
+        naming_convention = "[Date] - [Sender] - [Topic].[ext]"
+
     json_example = (
-        f'{{"date": "...", "sender": "...", "topic": "...", "person": "...", '
+        f'{{"date": "...", "sender": "...", "topic": "...", {person_json}'
         f'"country": "{country_choices}", '
         f'"folder_topic": "short folder name for this document\'s topic", '
         f'"tags": [], "confidence": "High|Medium|Low", '
@@ -322,7 +431,7 @@ def _build_prompt(
     return f"""\
 You are a document filing assistant. {config.prompt_context}
 
-NAMING CONVENTION: [Date] - [Sender] - [Topic] - [Person].[ext]
+NAMING CONVENTION: {naming_convention}
 
 Field definitions (in filename order):
 - Date: the document's issue date in ISO 8601 (YYYY-MM-DD, YYYY-MM, or YYYY). \
@@ -334,10 +443,7 @@ Embed a period or year ONLY when the covered period differs from the issue date 
 (e.g. a tax assessment for 2023 issued in 2024, or a bank statement for Dec 2025 issued Jan 2026). \
 When the topic period matches the issue date month, OMIT it — the Date field carries the temporal context. \
 Keep it concise.
-- Person: who the document primarily concerns (first name only). \
-Known people: {known_people}. \
-Use "Unknown" if no specific person applies or can be identified.
-
+{person_field}
 {countries_section}
 
 EXISTING FOLDERS (reuse if appropriate):
@@ -402,11 +508,14 @@ def _build_proposal(
     else:
         target_folder = f"{prefix}{folder_topic}"
 
+    if config.date_subfolders:
+        target_folder = f"{target_folder}/{date_to_subfolder(data.get('date', 'Undated'))}"
+
     return Proposal(
         original_path=path,
         sender=data["sender"],
         topic=data["topic"],
-        person=data["person"],
+        person=data.get("person", ""),
         date=data["date"],
         country=country,
         folder_topic=folder_topic,
@@ -449,9 +558,12 @@ def apply_three_document_rule(
         if topic_counts[key] < 3:
             p.folder_topic = "Unsorted"
             if p.country:
-                p.target_folder = f"{prefix}{p.country}/Unsorted"
+                unsorted = f"{prefix}{p.country}/Unsorted"
             else:
-                p.target_folder = f"{prefix}Unsorted"
+                unsorted = f"{prefix}Unsorted"
+            if ctx.config.date_subfolders:
+                unsorted = f"{unsorted}/{date_to_subfolder(p.date)}"
+            p.target_folder = unsorted
 
 
 def propose_all(
@@ -468,6 +580,7 @@ def propose_all(
         try:
             data = _call_claude(ext.text, existing, ctx.config)
             proposal = _build_proposal(ext.path, data, ctx.config)
+            proposal.translated_path = ext.translated_path
             proposals.append(proposal)
             print(f"OK ({proposal.confidence})")
         except Exception as e:
@@ -560,6 +673,8 @@ def display_proposals(
     for i, p in enumerate(proposals, 1):
         print(f"\n  [{i}] {p.original_path.name}")
         print(f"      → {p.filename}")
+        if p.translated_path:
+            print(f"      + {p.translated_filename}")
         print(f"      Folder:     {p.target_folder}/")
         print(f"      Tags:       {', '.join(p.tags) if p.tags else '(none)'}")
         print(f"      Confidence: {p.confidence}")
@@ -610,9 +725,10 @@ def _edit_proposal(p: Proposal) -> None:
     if val:
         p.topic = val
 
-    val = input(f"        Person [{p.person}]: ").strip()
-    if val:
-        p.person = val
+    if p.person:
+        val = input(f"        Person [{p.person}]: ").strip()
+        if val:
+            p.person = val
 
     val = input(f"        Date [{p.date}]: ").strip()
     if val:
@@ -717,6 +833,13 @@ def execute_all(
         executed.append(p)
         print(f"  Moved: {p.original_path.name} → {p.target_folder}/{p.filename}")
 
+        # Move translated companion file alongside the original
+        if p.translated_path and p.translated_path.exists():
+            translated_target = target_dir / p.translated_filename
+            p.translated_path.rename(translated_target)
+            apply_tags(translated_target, all_tags)
+            print(f"  Moved: {p.translated_path.name} → {p.target_folder}/{p.translated_filename}")
+
         if on_executed:
             on_executed(p)
 
@@ -763,6 +886,8 @@ def write_intake_log(
         lines.append(f"- Tags:        {', '.join(p.tags) if p.tags else '(none)'}")
         lines.append(f"- Confidence:  {p.confidence}")
         lines.append(f"- Notes:       {p.notes}")
+        if p.translated_filename:
+            lines.append(f"- Translation: {p.translated_filename}")
         lines.append("")
 
     for d in duplicates:
@@ -962,6 +1087,11 @@ def _scan_extract_propose(
         print("No readable files — nothing to propose.")
         display_proposals([], extractions, duplicates)
         return [], flagged, duplicates
+
+    # 2.5. TRANSLATE
+    if ctx.config.translation_enabled:
+        print("\n── Translate ───────────────────────────────────────────────")
+        translate_all(extractions, ctx)
 
     # 3. PROPOSE
     print("\n── Propose ─────────────────────────────────────────────────")

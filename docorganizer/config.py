@@ -9,6 +9,22 @@ import yaml
 CONFIG_FILENAME = "docorganizer.yaml"
 
 
+def date_to_subfolder(date_str: str) -> str:
+    """Derive a YYYY-MM subfolder name from a document date string.
+
+    YYYY-MM-DD -> YYYY-MM
+    YYYY-MM    -> YYYY-MM
+    YYYY       -> YYYY
+    Undated    -> Undated
+    """
+    if date_str == "Undated":
+        return "Undated"
+    parts = date_str.split("-")
+    if len(parts) >= 2:
+        return f"{parts[0]}-{parts[1]}"
+    return parts[0]
+
+
 @dataclass
 class ArchiveConfig:
     """Domain-specific configuration for a document archive.
@@ -29,6 +45,16 @@ class ArchiveConfig:
     archive_dir: str = "_archive"
     intake_log: str = "intake-log.md"
     todo_dir: str = "ToDo"
+    date_subfolders: bool = False
+
+    # Translation: auto-translate documents in specified source languages via DeepL
+    translation_target: str = ""  # e.g. "EN-US" — empty means translation disabled
+    translation_sources: list[str] = field(default_factory=list)  # e.g. ["LV", "RU"]
+
+    @property
+    def use_person(self) -> bool:
+        """Whether person tracking is enabled (people section is configured)."""
+        return bool(self.people)
 
     @property
     def root_folder_prefix(self) -> str:
@@ -47,6 +73,11 @@ class ArchiveConfig:
     def countries_set(self) -> frozenset[str]:
         """Countries as a frozenset for efficient lookup."""
         return frozenset(self.countries)
+
+    @property
+    def translation_enabled(self) -> bool:
+        """Whether automatic translation is configured."""
+        return bool(self.translation_target and self.translation_sources)
 
 
 @dataclass
@@ -112,6 +143,8 @@ def load_config(archive_root: Path) -> ArchiveConfig:
     with open(config_path) as f:
         raw = yaml.safe_load(f)
 
+    translation = raw.get("translation", {})
+
     return ArchiveConfig(
         name=raw["name"],
         root_folder=raw.get("root_folder"),
@@ -124,4 +157,7 @@ def load_config(archive_root: Path) -> ArchiveConfig:
         archive_dir=raw.get("archive_dir", "_archive"),
         intake_log=raw.get("intake_log", "intake-log.md"),
         todo_dir=raw.get("todo_dir", "ToDo"),
+        date_subfolders=raw.get("date_subfolders", False),
+        translation_target=translation.get("target_language", ""),
+        translation_sources=translation.get("source_languages", []),
     )
