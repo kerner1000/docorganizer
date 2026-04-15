@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from docorganizer.config import ArchiveConfig
+from docorganizer.config import ArchiveConfig, date_to_subfolder
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -50,19 +50,26 @@ class Issue:
 def _parse_filename(name: str) -> dict | None:
     """Parse a filed document name into fields.
 
-    Expected: 'Date - Sender - Topic - Person.ext'
-    Returns dict with date, sender, topic, person or None if unparseable.
+    Expected: 'Date - Sender - Topic - Person.ext' (4 fields)
+    or:       'Date - Sender - Topic.ext' (3 fields, no person tracking)
+    Returns dict with date, sender, topic, and optionally person, or None if unparseable.
     """
     stem = Path(name).stem
     parts = stem.split(" - ")
-    if len(parts) != 4:
-        return None
-    return {
-        "date": parts[0].strip(),
-        "sender": parts[1].strip(),
-        "topic": parts[2].strip(),
-        "person": parts[3].strip(),
-    }
+    if len(parts) == 4:
+        return {
+            "date": parts[0].strip(),
+            "sender": parts[1].strip(),
+            "topic": parts[2].strip(),
+            "person": parts[3].strip(),
+        }
+    if len(parts) == 3:
+        return {
+            "date": parts[0].strip(),
+            "sender": parts[1].strip(),
+            "topic": parts[2].strip(),
+        }
+    return None
 
 
 def build_sender_registry(
@@ -170,6 +177,10 @@ def _check_date_format(proposal) -> list[Issue]:
 def _check_person(proposal, config: ArchiveConfig) -> list[Issue]:
     """Validate and auto-correct person field against known people."""
     issues = []
+
+    if not config.use_person:
+        return issues
+
     person = proposal.person
 
     if person in config.people or person == "Unknown":
@@ -258,11 +269,12 @@ def _check_sender_consistency(
         proposal.folder_topic = entry.folder_topic
         prefix = config.root_folder_prefix
         if proposal.country:
-            proposal.target_folder = (
-                f"{prefix}{proposal.country}/{entry.folder_topic}"
-            )
+            target = f"{prefix}{proposal.country}/{entry.folder_topic}"
         else:
-            proposal.target_folder = f"{prefix}{entry.folder_topic}"
+            target = f"{prefix}{entry.folder_topic}"
+        if config.date_subfolders:
+            target = f"{target}/{date_to_subfolder(proposal.date)}"
+        proposal.target_folder = target
 
     return issues
 
@@ -299,7 +311,7 @@ def _check_batch_topic_drift(proposals: list) -> list[tuple[int, Issue]]:
     issues = []
     groups: dict[tuple[str, str], list[tuple[int, str]]] = {}
     for i, p in enumerate(proposals):
-        key = (p.sender.lower(), p.person.lower())
+        key = (p.sender.lower(), p.person.lower()) if p.person else (p.sender.lower(),)
         groups.setdefault(key, []).append((i, p.topic))
 
     for key, entries in groups.items():
@@ -380,7 +392,10 @@ def _normalize_invoice_topic(proposal) -> list[Issue]:
 def _check_filename_separators(proposal) -> list[Issue]:
     """Check for problematic characters in fields that break the naming convention."""
     issues = []
-    for field_name in ("sender", "topic", "person"):
+    fields = ["sender", "topic"]
+    if proposal.person:
+        fields.append("person")
+    for field_name in fields:
         value = getattr(proposal, field_name)
         if " - " in value:
             cleaned = value.replace(" - ", " — ")

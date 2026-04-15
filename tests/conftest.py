@@ -74,6 +74,30 @@ def flat_ctx(tmp_path, flat_config):
 
 
 @pytest.fixture
+def no_person_config():
+    """An ArchiveConfig with no people — person field omitted from filenames."""
+    return ArchiveConfig(
+        name="Company Archive",
+        root_folder=None,
+        people={},
+        countries=[],
+        tags={
+            "Banking": "Bank statements and correspondence",
+            "Tax": "Tax-relevant documents",
+        },
+        mandatory_tags=[],
+        prompt_context="A company archive without person tracking.",
+    )
+
+
+@pytest.fixture
+def no_person_ctx(tmp_path, no_person_config):
+    """An ArchiveContext without person tracking."""
+    (tmp_path / "inbox").mkdir()
+    return ArchiveContext(config=no_person_config, root=tmp_path)
+
+
+@pytest.fixture
 def no_root_config():
     """An ArchiveConfig with no root_folder — filing root equals archive root."""
     return ArchiveConfig(

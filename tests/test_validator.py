@@ -56,6 +56,15 @@ class TestParseFilename:
             "person": "Alex",
         }
 
+    def test_valid_three_field_name(self):
+        result = _parse_filename("2026-01-27 - UBS Switzerland AG - Debit Card Charge.pdf")
+        assert result == {
+            "date": "2026-01-27",
+            "sender": "UBS Switzerland AG",
+            "topic": "Debit Card Charge",
+        }
+        assert "person" not in result
+
     def test_returns_none_for_wrong_field_count(self):
         assert _parse_filename("no-dashes-here.pdf") is None
         assert _parse_filename("one - two.pdf") is None
@@ -144,6 +153,24 @@ class TestCheckPerson:
         assert len(issues) == 1
         assert issues[0].severity == "fixed"
         assert p.person == "Kristina"
+
+    def test_skipped_when_no_people_configured(self, no_person_config):
+        p = _make_proposal(person="anything")
+        issues = _check_person(p, no_person_config)
+        assert issues == []
+
+
+# ── Proposal.filename without person ───────────────────────────────────────
+
+
+class TestProposalFilenameNoPerson:
+    def test_three_field_filename(self):
+        p = _make_proposal(person="")
+        assert p.filename == "2024-01-15 - Test Sender - Test Topic.pdf"
+
+    def test_four_field_filename(self):
+        p = _make_proposal(person="Alexander")
+        assert p.filename == "2024-01-15 - Test Sender - Test Topic - Alexander.pdf"
 
 
 # ── _check_sender_consistency ────────────────────────────────────────────────
