@@ -1,0 +1,19 @@
+[project]
+name = "docorganizer"
+version = "0.1.0"
+description = "Document inbox organizer — classifies, renames, and files documents"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic",
+    "pdfplumber",
+    "python-docx",
+    "python-dotenv",
+    "pyyaml",
+    "xattr",
+]
+
+[project.scripts]
+docorganizer = "docorganizer.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

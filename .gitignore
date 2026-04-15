@@ -1,0 +1,11 @@
+.venv/
+*.pyc
+__pycache__/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+proposals.json
+refactor.json
+.DS_Store
