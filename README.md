@@ -31,7 +31,11 @@ The only required subdirectory is `inbox/` — everything else is created automa
 ```yaml
 # Required
 name: My Archive                    # human-readable name (for logs)
-root_folder: Documents              # top-level folder for filed documents
+
+# Optional — top-level folder for filed documents.
+# When set, filed documents go into root_folder/Country/Topic/.
+# When omitted, topic folders live directly in the archive root (flat layout).
+root_folder: Documents
 
 # People — first name as key, full name variants as values
 # The classifier uses these to normalize person references in documents.
@@ -131,7 +135,7 @@ docorganizer --archive /path/to/MyArchive --propose
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `name` | yes | — | Archive name (for logs) |
-| `root_folder` | yes | — | Top-level folder for filed documents |
+| `root_folder` | no | *(flat)* | Top-level folder for filed documents. Omit for flat layout. |
 | `people` | no | `{}` | Person name variants for normalization |
 | `countries` | no | `[]` | Optional intermediate folder grouping (e.g. by country). Omit for flat `root_folder/topic/` layout. |
 | `tags` | no | `{}` | Controlled tag vocabulary (name: description) |
@@ -174,7 +178,7 @@ MyArchive/
   intake-log.md
 ```
 
-Without countries (flat layout):
+Without countries:
 
 ```
 MyArchive/
@@ -183,6 +187,21 @@ MyArchive/
   inbox/
   Documents/               # root_folder
     Invoices/              # topic folder directly under root
+    Contracts/
+    Unsorted/
+  _archive/
+  intake-log.md
+```
+
+Without root_folder (flat layout — topic folders at archive root):
+
+```
+MyArchive/
+  docorganizer.yaml
+  .env
+  inbox/
+  Germany/                 # country folder directly at root
+    Invoices/
     Contracts/
     Unsorted/
   _archive/

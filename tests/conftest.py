@@ -71,3 +71,28 @@ def flat_ctx(tmp_path, flat_config):
     (tmp_path / "inbox").mkdir()
     (tmp_path / "Documents").mkdir()
     return ArchiveContext(config=flat_config, root=tmp_path)
+
+
+@pytest.fixture
+def no_root_config():
+    """An ArchiveConfig with no root_folder — filing root equals archive root."""
+    return ArchiveConfig(
+        name="No Root Archive",
+        root_folder=None,
+        people={"Alex": ["Alexander Kerner"]},
+        countries=["Germany"],
+        tags={
+            "Tax": "Tax-relevant documents",
+            "Contract": "Signed agreements",
+        },
+        mandatory_tags=[],
+        prompt_context="Flat layout archive.",
+    )
+
+
+@pytest.fixture
+def no_root_ctx(tmp_path, no_root_config):
+    """An ArchiveContext where root_folder == root (flat layout)."""
+    (tmp_path / "inbox").mkdir()
+    (tmp_path / "Germany" / "Invoices").mkdir(parents=True)
+    return ArchiveContext(config=no_root_config, root=tmp_path)

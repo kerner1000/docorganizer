@@ -256,14 +256,13 @@ def _check_sender_consistency(
             reason=f"Inferred from sender registry — prior filings in '{entry.folder_topic}'",
         ))
         proposal.folder_topic = entry.folder_topic
+        prefix = config.root_folder_prefix
         if proposal.country:
             proposal.target_folder = (
-                f"{config.root_folder}/{proposal.country}/{entry.folder_topic}"
+                f"{prefix}{proposal.country}/{entry.folder_topic}"
             )
         else:
-            proposal.target_folder = (
-                f"{config.root_folder}/{entry.folder_topic}"
-            )
+            proposal.target_folder = f"{prefix}{entry.folder_topic}"
 
     return issues
 

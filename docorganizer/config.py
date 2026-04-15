@@ -17,7 +17,7 @@ class ArchiveConfig:
     """
 
     name: str
-    root_folder: str  # top-level folder for filed documents (e.g. "Family")
+    root_folder: str | None  # top-level folder for filed documents, or None for flat layout
 
     people: dict[str, list[str]]  # first_name -> [full name variants]
     countries: list[str]
@@ -29,6 +29,14 @@ class ArchiveConfig:
     archive_dir: str = "_archive"
     intake_log: str = "intake-log.md"
     todo_dir: str = "ToDo"
+
+    @property
+    def root_folder_prefix(self) -> str:
+        """Prefix for building target_folder path strings.
+
+        Returns 'root_folder/' when set, '' when flat layout.
+        """
+        return f"{self.root_folder}/" if self.root_folder else ""
 
     @property
     def controlled_tags(self) -> frozenset[str]:
@@ -54,7 +62,19 @@ class ArchiveContext:
 
     @property
     def root_folder(self) -> Path:
-        return self.root / self.config.root_folder
+        """Filing root. Same as archive root when root_folder is None (flat layout)."""
+        if self.config.root_folder:
+            return self.root / self.config.root_folder
+        return self.root
+
+    @property
+    def tool_dir_names(self) -> frozenset[str]:
+        """Directory names used by docorganizer (excluded from filing scans)."""
+        return frozenset({
+            self.config.inbox_dir,
+            self.config.archive_dir,
+            self.config.todo_dir,
+        })
 
     @property
     def archive(self) -> Path:
@@ -94,7 +114,7 @@ def load_config(archive_root: Path) -> ArchiveConfig:
 
     return ArchiveConfig(
         name=raw["name"],
-        root_folder=raw["root_folder"],
+        root_folder=raw.get("root_folder"),
         people=raw.get("people", {}),
         countries=raw.get("countries", []),
         tags=raw.get("tags", {}),

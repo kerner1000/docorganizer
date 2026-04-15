@@ -172,6 +172,44 @@ class TestFindDuplicatesFlatArchive:
         assert len(remaining) == 1
 
 
+class TestFindDuplicatesNoRootFolder:
+    """Duplicate detection with root_folder=None (flat layout, filing root == archive root)."""
+
+    def test_duplicate_of_filed_document(self, no_root_ctx):
+        """Filed documents are found even when root_folder equals archive root."""
+        inbox = no_root_ctx.inbox
+        content = "identical document"
+        _write_file(no_root_ctx.root / "Germany" / "Invoices" / "filed.pdf", content)
+        _write_file(inbox / "incoming.pdf", content)
+
+        duplicates, remaining = find_duplicates([inbox / "incoming.pdf"], no_root_ctx)
+
+        assert len(duplicates) == 1
+        assert remaining == []
+
+    def test_inbox_files_not_treated_as_existing(self, no_root_ctx):
+        """Files in inbox/ must not be hashed as 'existing' — they'd match themselves."""
+        inbox = no_root_ctx.inbox
+        _write_file(inbox / "new.pdf", "unique content")
+
+        duplicates, remaining = find_duplicates([inbox / "new.pdf"], no_root_ctx)
+
+        assert duplicates == []
+        assert len(remaining) == 1
+
+    def test_archive_dir_files_excluded_from_root_scan(self, no_root_ctx):
+        """Files in _archive/ are scanned via the archive search_root, not the root scan."""
+        inbox = no_root_ctx.inbox
+        content = "archived content"
+        _write_file(no_root_ctx.archive / "inbox" / "old.pdf", content)
+        _write_file(inbox / "old.pdf", content)
+
+        duplicates, remaining = find_duplicates([inbox / "old.pdf"], no_root_ctx)
+
+        assert len(duplicates) == 1
+        assert remaining == []
+
+
 class TestArchiveDuplicates:
     def test_moves_file_to_archive_inbox(self, test_ctx):
         inbox = test_ctx.inbox

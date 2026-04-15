@@ -176,11 +176,22 @@ def find_duplicates(
     files that should proceed to extraction.
     """
     existing_hashes: dict[str, Path] = {}
+    # In flat layout (root_folder == root), exclude tool directories from the root scan
+    # so inbox/archive/todo files aren't treated as existing filed documents.
+    # The archive is scanned separately as its own search_root without exclusions.
+    exclude_dirs = (
+        {ctx.root / name for name in ctx.tool_dir_names}
+        if ctx.root_folder == ctx.root
+        else set()
+    )
     for search_root in (ctx.root_folder, ctx.archive):
         if not search_root.exists():
             continue
+        skip = exclude_dirs if search_root == ctx.root_folder else set()
         for path in search_root.rglob("*"):
             if path.is_file() and not path.name.startswith("."):
+                if skip and any(path.is_relative_to(d) for d in skip):
+                    continue
                 existing_hashes[compute_file_hash(path)] = path
 
     duplicates: list[DuplicateFile] = []
@@ -247,6 +258,9 @@ def get_existing_structure(ctx: ArchiveContext) -> dict[str, list[str]] | list[s
     With countries: {country: [folder_names]}
     Without countries: [folder_names]
     """
+    # In flat layout, exclude tool directories from folder listing
+    exclude_names = ctx.tool_dir_names if ctx.root_folder == ctx.root else frozenset()
+
     if ctx.config.countries:
         structure = {}
         for country in sorted(ctx.config.countries):
@@ -265,7 +279,9 @@ def get_existing_structure(ctx: ArchiveContext) -> dict[str, list[str]] | list[s
     if ctx.root_folder.exists():
         return sorted(
             f.name for f in ctx.root_folder.iterdir()
-            if f.is_dir() and f.name != "Unsorted"
+            if f.is_dir()
+            and f.name != "Unsorted"
+            and f.name not in exclude_names
         )
     return []
 
@@ -380,10 +396,11 @@ def _build_proposal(
     folder_topic = data.get("folder_topic", "Unsorted")
     tags = [t for t in data.get("tags", []) if t in config.controlled_tags]
 
+    prefix = config.root_folder_prefix
     if country:
-        target_folder = f"{config.root_folder}/{country}/{folder_topic}"
+        target_folder = f"{prefix}{country}/{folder_topic}"
     else:
-        target_folder = f"{config.root_folder}/{folder_topic}"
+        target_folder = f"{prefix}{folder_topic}"
 
     return Proposal(
         original_path=path,
@@ -416,6 +433,7 @@ def apply_three_document_rule(
         if p.folder_topic != "Unsorted":
             topic_counts[(p.country, p.folder_topic)] += 1
 
+    prefix = ctx.config.root_folder_prefix
     for p in proposals:
         if p.folder_topic == "Unsorted":
             continue
@@ -431,11 +449,9 @@ def apply_three_document_rule(
         if topic_counts[key] < 3:
             p.folder_topic = "Unsorted"
             if p.country:
-                p.target_folder = (
-                    f"{ctx.config.root_folder}/{p.country}/Unsorted"
-                )
+                p.target_folder = f"{prefix}{p.country}/Unsorted"
             else:
-                p.target_folder = f"{ctx.config.root_folder}/Unsorted"
+                p.target_folder = f"{prefix}Unsorted"
 
 
 def propose_all(
@@ -874,9 +890,10 @@ def execute_refactor(
         print(f"  Moved: {rel_source} → {rel_target}")
 
     # Clean up empty source directories
+    stop_dirs = {ctx.root, ctx.root_folder}
     for d in sorted(empty_dirs, reverse=True):
         current = d
-        while current not in (ctx.root, ctx.root_folder):
+        while current not in stop_dirs:
             try:
                 if current.exists() and not any(current.iterdir()):
                     rel = current.relative_to(ctx.root)

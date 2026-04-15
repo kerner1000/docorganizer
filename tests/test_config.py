@@ -55,6 +55,33 @@ class TestArchiveContext:
         assert ctx.proposals_file == tmp_path / "proposals.json"
         assert ctx.refactor_file == tmp_path / "refactor.json"
 
+    def test_no_root_folder_resolves_to_root(self, tmp_path):
+        config = ArchiveConfig(
+            name="Test", root_folder=None,
+            people={}, countries=[], mandatory_tags=[],
+            tags={}, prompt_context="",
+        )
+        ctx = ArchiveContext(config=config, root=tmp_path)
+
+        assert ctx.root_folder == tmp_path
+        assert ctx.tool_dir_names == frozenset({"inbox", "_archive", "ToDo"})
+
+    def test_root_folder_prefix_with_name(self):
+        config = ArchiveConfig(
+            name="Test", root_folder="Documents",
+            people={}, countries=[], mandatory_tags=[],
+            tags={}, prompt_context="",
+        )
+        assert config.root_folder_prefix == "Documents/"
+
+    def test_root_folder_prefix_without_name(self):
+        config = ArchiveConfig(
+            name="Test", root_folder=None,
+            people={}, countries=[], mandatory_tags=[],
+            tags={}, prompt_context="",
+        )
+        assert config.root_folder_prefix == ""
+
     def test_custom_dir_names(self, tmp_path):
         config = ArchiveConfig(
             name="Test", root_folder="Documents",
@@ -111,3 +138,11 @@ class TestLoadConfig:
         assert config.mandatory_tags == []
         assert config.prompt_context == ""
         assert config.inbox_dir == "inbox"
+
+    def test_root_folder_omitted_is_none(self, tmp_path):
+        config_data = {"name": "Flat"}
+        (tmp_path / "docorganizer.yaml").write_text(yaml.dump(config_data))
+
+        config = load_config(tmp_path)
+
+        assert config.root_folder is None
