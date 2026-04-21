@@ -13,6 +13,19 @@ pip install -e .
 
 This installs the `docorganizer` CLI command (available when the venv is active).
 
+### Optional: OCR fallback
+
+For scanned PDFs and PDFs whose text is rendered as vector outlines (no
+selectable glyphs), the extractor falls back to OCR via `tesseract` + `pdftoppm`.
+Install both if you expect such documents:
+
+```bash
+brew install tesseract tesseract-lang poppler
+```
+
+`tesseract-lang` adds German/Latvian language data (the extractor uses `deu+eng+lav`).
+If either binary is missing, OCR is skipped and the file is flagged as unreadable.
+
 ## Setting up a new archive
 
 An archive is any directory with a `docorganizer.yaml` config file. The tool reads this file from the current working directory.

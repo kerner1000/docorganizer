@@ -13,6 +13,13 @@ dependencies = [
     "xattr",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pillow",
+    "reportlab",
+]
+
 [project.scripts]
 docorganizer = "docorganizer.cli:main"
 
