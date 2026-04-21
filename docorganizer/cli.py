@@ -566,6 +566,36 @@ def apply_three_document_rule(
             p.target_folder = unsorted
 
 
+def _match_business_routing(text: str, config: ArchiveConfig):
+    """Return the first BusinessRoutingRule whose match_strings appear in ``text``.
+
+    Matching is case-insensitive and substring-based.
+    """
+    lowered = text.lower()
+    for rule in config.business_routing:
+        if any(s.lower() in lowered for s in rule.match_strings):
+            return rule
+    return None
+
+
+def apply_business_routing(proposal: Proposal, text: str, config: ArchiveConfig) -> str | None:
+    """Override proposal routing fields when a business-routing rule matches ``text``.
+
+    Returns the name of the rule applied, or None.
+    """
+    rule = _match_business_routing(text, config)
+    if rule is None:
+        return None
+    proposal.target_folder = rule.target_folder
+    proposal.folder_topic = rule.target_folder.rsplit("/", 1)[-1]
+    for tag in rule.append_tags:
+        if tag not in proposal.tags:
+            proposal.tags.append(tag)
+    if rule.override_person:
+        proposal.person = rule.override_person
+    return rule.name
+
+
 def propose_all(
     extractions: list[Extraction], ctx: ArchiveContext,
 ) -> list[Proposal]:
@@ -581,8 +611,10 @@ def propose_all(
             data = _call_claude(ext.text, existing, ctx.config)
             proposal = _build_proposal(ext.path, data, ctx.config)
             proposal.translated_path = ext.translated_path
+            routed = apply_business_routing(proposal, ext.text, ctx.config)
             proposals.append(proposal)
-            print(f"OK ({proposal.confidence})")
+            suffix = f" [routed: {routed}]" if routed else ""
+            print(f"OK ({proposal.confidence}){suffix}")
         except Exception as e:
             print(f"FAILED — {e}")
 
@@ -779,6 +811,27 @@ def apply_tags(path: Path, tags: list[str]) -> None:
     xattr_lib.setxattr(str(path), "com.apple.metadata:_kMDItemUserTags", plist_data)
 
 
+def _resolve_collision(target_dir: Path, proposal: Proposal) -> Path:
+    """Return a non-colliding target path for ``proposal`` in ``target_dir``.
+
+    If the default filename already exists, append ``(2)``, ``(3)``, … to the
+    topic field (in-place on the proposal) until a free slot is found. Mutation
+    is intentional: downstream logging and persistence reflect the actual
+    filename chosen.
+    """
+    target = target_dir / proposal.filename
+    if not target.exists():
+        return target
+    base_topic = proposal.topic
+    n = 2
+    while True:
+        proposal.topic = f"{base_topic} ({n})"
+        target = target_dir / proposal.filename
+        if not target.exists():
+            return target
+        n += 1
+
+
 def execute_all(
     proposals: list[Proposal],
     ctx: ArchiveContext,
@@ -796,15 +849,15 @@ def execute_all(
 
         target_dir = ctx.root / p.target_folder
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / p.filename
+        default_target = target_dir / p.filename
 
         # Merge mandatory tags (deduplicated, order-preserving)
         all_tags = list(dict.fromkeys(p.tags + ctx.config.mandatory_tags))
 
         # Resume: file already moved in a previous partial run
         if not p.original_path.exists():
-            if target.exists():
-                apply_tags(target, all_tags)
+            if default_target.exists():
+                apply_tags(default_target, all_tags)
                 p.status = "executed"
                 executed.append(p)
                 print(
@@ -821,10 +874,8 @@ def execute_all(
                 p.status = "skipped"
             continue
 
-        if target.exists():
-            print(f"  CONFLICT: {target} already exists — skipping {p.original_path.name}")
-            p.status = "skipped"
-            continue
+        # Resolve name collisions by appending (2), (3), … to the topic.
+        target = _resolve_collision(target_dir, p)
 
         # Rename + move in one operation
         p.original_path.rename(target)

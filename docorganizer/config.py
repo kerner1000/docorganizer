@@ -26,6 +26,24 @@ def date_to_subfolder(date_str: str) -> str:
 
 
 @dataclass
+class BusinessRoutingRule:
+    """Deterministic post-classification override for business entity routing.
+
+    If the document's extracted text contains any of ``match_strings`` (case-
+    insensitive), the matched proposal's ``target_folder``, ``tags``, and
+    optionally ``person`` are overridden. The LLM still provides sender, topic,
+    and date — this rule only redirects *where* and *how* the document is
+    filed.
+    """
+
+    name: str
+    match_strings: list[str]
+    target_folder: str
+    append_tags: list[str] = field(default_factory=list)
+    override_person: str | None = None
+
+
+@dataclass
 class ArchiveConfig:
     """Domain-specific configuration for a document archive.
 
@@ -50,6 +68,9 @@ class ArchiveConfig:
     # Translation: auto-translate documents in specified source languages via DeepL
     translation_target: str = ""  # e.g. "EN-US" — empty means translation disabled
     translation_sources: list[str] = field(default_factory=list)  # e.g. ["LV", "RU"]
+
+    # Deterministic routing overrides applied after LLM classification
+    business_routing: list[BusinessRoutingRule] = field(default_factory=list)
 
     @property
     def use_person(self) -> bool:
@@ -145,6 +166,17 @@ def load_config(archive_root: Path) -> ArchiveConfig:
 
     translation = raw.get("translation", {})
 
+    business_routing = [
+        BusinessRoutingRule(
+            name=r["name"],
+            match_strings=r["match_strings"],
+            target_folder=r["target_folder"],
+            append_tags=r.get("append_tags", []),
+            override_person=r.get("override_person"),
+        )
+        for r in raw.get("business_routing", [])
+    ]
+
     return ArchiveConfig(
         name=raw["name"],
         root_folder=raw.get("root_folder"),
@@ -160,4 +192,5 @@ def load_config(archive_root: Path) -> ArchiveConfig:
         date_subfolders=raw.get("date_subfolders", False),
         translation_target=translation.get("target_language", ""),
         translation_sources=translation.get("source_languages", []),
+        business_routing=business_routing,
     )
