@@ -68,13 +68,27 @@ class Proposal:
     notes: str
     status: str = "proposed"  # proposed, approved, corrected, skipped
     translated_path: Path | None = None  # companion translated document
+    filename_override: str | None = None  # explicit filename set by user; bypasses synthesis
 
     @property
-    def filename(self) -> str:
+    def synthesized_filename(self) -> str:
+        """The filename derived from the structured fields (date, sender, topic, person)."""
         base = f"{self.date} - {self.sender} - {self.topic}"
         if self.person:
             base += f" - {self.person}"
         return base + self.original_path.suffix
+
+    @property
+    def filename(self) -> str:
+        """The filename actually used at execute time.
+
+        Honors ``filename_override`` when set (e.g. user edited ``proposed_filename``
+        in the JSON to a name that doesn't match the synthesis pattern); falls
+        back to the synthesized name otherwise.
+        """
+        if self.filename_override:
+            return self.filename_override
+        return self.synthesized_filename
 
     @property
     def translated_filename(self) -> str | None:
@@ -103,12 +117,14 @@ class Proposal:
         }
         if self.translated_path is not None:
             d["translated_path"] = str(self.translated_path)
+        if self.filename_override is not None:
+            d["filename_override"] = self.filename_override
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Proposal":
         translated = d.get("translated_path")
-        return cls(
+        proposal = cls(
             original_path=Path(d["original_path"]),
             sender=d["sender"],
             topic=d["topic"],
@@ -122,7 +138,14 @@ class Proposal:
             notes=d["notes"],
             status=d.get("status", "approved"),
             translated_path=Path(translated) if translated else None,
+            filename_override=d.get("filename_override"),
         )
+        # Back-compat: if the user edited ``proposed_filename`` to a name that
+        # doesn't match the synthesis pattern, honor it as an override.
+        pf = d.get("proposed_filename")
+        if pf and pf != proposal.synthesized_filename and not proposal.filename_override:
+            proposal.filename_override = pf
+        return proposal
 
 
 @dataclass
@@ -814,14 +837,29 @@ def apply_tags(path: Path, tags: list[str]) -> None:
 def _resolve_collision(target_dir: Path, proposal: Proposal) -> Path:
     """Return a non-colliding target path for ``proposal`` in ``target_dir``.
 
-    If the default filename already exists, append ``(2)``, ``(3)``, … to the
-    topic field (in-place on the proposal) until a free slot is found. Mutation
-    is intentional: downstream logging and persistence reflect the actual
-    filename chosen.
+    If the default filename already exists, append ``(2)``, ``(3)``, … until a
+    free slot is found. Mutation is intentional: downstream logging and
+    persistence reflect the actual filename chosen.
+
+    - For synthesized filenames, the counter is appended to the ``topic`` field.
+    - For overridden filenames, the counter is appended to the override's stem.
     """
     target = target_dir / proposal.filename
     if not target.exists():
         return target
+
+    if proposal.filename_override:
+        stem = Path(proposal.filename_override).stem
+        suffix = Path(proposal.filename_override).suffix
+        base_stem = stem
+        n = 2
+        while True:
+            proposal.filename_override = f"{base_stem} ({n}){suffix}"
+            target = target_dir / proposal.filename
+            if not target.exists():
+                return target
+            n += 1
+
     base_topic = proposal.topic
     n = 2
     while True:
