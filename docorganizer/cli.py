@@ -463,6 +463,16 @@ Placed first for chronological sorting. Use "Undated" if the date cannot be dete
 - Sender: who issued the document. Use the natural name (e.g. "Finanzamt Heidelberg", \
 "Commerzbank"). Abbreviate only when unambiguous.
 - Topic: what the document is about, always in English. \
+For common document types, use the bare type word ALONE — do NOT include descriptive details \
+about the subject matter. The Sender field already provides context.
+  Examples of correct vs. wrong detail level:
+  - GOOD `Invoice`           BAD `Interior design invoice — window treatments`
+  - GOOD `Order`             BAD `Eyeglasses order and warranty — Fielmann BD481 CL`
+  - GOOD `Purchase contract` BAD `Purchase contract — bed frame and delivery`
+  - GOOD `Statement`         BAD `Checking Account Statement — December 2025`
+  - GOOD `Policy`            BAD `Liability Insurance Policy — coverage details`
+  Only add a qualifier when it truly distinguishes the document from another filing that would \
+otherwise collide (e.g. `Tax Assessment 2023` vs. `Tax Assessment 2024` from the same sender, same year). \
 Embed a period or year ONLY when the covered period differs from the issue date \
 (e.g. a tax assessment for 2023 issued in 2024, or a bank statement for Dec 2025 issued Jan 2026). \
 When the topic period matches the issue date month, OMIT it — the Date field carries the temporal context. \

@@ -17,7 +17,7 @@ from docorganizer.validator import (
     _check_person,
     _check_sender_consistency,
     _check_tags_valid,
-    _normalize_invoice_topic,
+    _normalize_document_type_topic,
     _parse_filename,
     build_sender_registry,
     sanitize_field,
@@ -273,54 +273,184 @@ class TestCheckBatchSenderDrift:
         assert issues == []
 
 
-# ── _normalize_invoice_topic ─────────────────────────────────────────────────
+# ── _normalize_document_type_topic ───────────────────────────────────────────
 
 
-class TestNormalizeInvoiceTopic:
+class TestNormalizeDocumentTypeTopic:
+    # Pre-existing invoice cases ----------------------------------------------
+
     def test_bare_invoice_unchanged(self):
         p = _make_proposal(topic="Invoice")
-        assert _normalize_invoice_topic(p) == []
+        assert _normalize_document_type_topic(p) == []
         assert p.topic == "Invoice"
 
     def test_invoice_with_period_unchanged(self):
         p = _make_proposal(topic="Invoice 2021-02")
-        assert _normalize_invoice_topic(p) == []
+        assert _normalize_document_type_topic(p) == []
         assert p.topic == "Invoice 2021-02"
 
     def test_descriptive_prefix_stripped(self):
         p = _make_proposal(topic="Language Course Invoice")
-        issues = _normalize_invoice_topic(p)
+        issues = _normalize_document_type_topic(p)
         assert len(issues) == 1
         assert issues[0].severity == "fixed"
         assert p.topic == "Invoice"
 
     def test_descriptive_prefix_with_period_stripped(self):
         p = _make_proposal(topic="Medical Laboratory Invoice 2021-02")
-        issues = _normalize_invoice_topic(p)
+        issues = _normalize_document_type_topic(p)
         assert len(issues) == 1
         assert p.topic == "Invoice 2021-02"
 
     def test_legal_services_invoice_stripped(self):
         p = _make_proposal(topic="Legal Services Invoice")
-        issues = _normalize_invoice_topic(p)
+        issues = _normalize_document_type_topic(p)
         assert len(issues) == 1
         assert p.topic == "Invoice"
 
     def test_mobile_phone_invoice_stripped(self):
         p = _make_proposal(topic="Mobile Phone Invoice 2020-06")
-        issues = _normalize_invoice_topic(p)
+        issues = _normalize_document_type_topic(p)
         assert len(issues) == 1
         assert p.topic == "Invoice 2020-06"
 
     def test_non_invoice_topic_unchanged(self):
         p = _make_proposal(topic="Credit Report")
-        assert _normalize_invoice_topic(p) == []
+        assert _normalize_document_type_topic(p) == []
         assert p.topic == "Credit Report"
 
     def test_invoice_counter_preserved(self):
         p = _make_proposal(topic="Invoice 2")
-        assert _normalize_invoice_topic(p) == []
+        assert _normalize_document_type_topic(p) == []
         assert p.topic == "Invoice 2"
+
+    # Batch regression cases (2026-04-24) -------------------------------------
+
+    def test_interior_design_invoice_window_treatments(self):
+        p = _make_proposal(topic="Interior design invoice — window treatments")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        assert issues[0].field == "topic"
+        assert p.topic == "Invoice"
+
+    def test_interior_cleaning_service_volvo(self):
+        p = _make_proposal(topic="Interior cleaning service — Volvo XC 60")
+        issues = _normalize_document_type_topic(p)
+        # "service" doesn't match, but no type word present -> no change.
+        # Wait: "service" is not in list. Should remain unchanged.
+        assert issues == []
+        assert p.topic == "Interior cleaning service — Volvo XC 60"
+
+    def test_purchase_contract_and_receipt_furniture(self):
+        p = _make_proposal(topic="Purchase contract and receipt — furniture and household items")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        # Multi-word type matches as a unit, not reduced to 'Contract'.
+        assert p.topic == "Purchase contract"
+
+    def test_eyeglasses_order_and_warranty(self):
+        p = _make_proposal(topic="Eyeglasses order and warranty — Fielmann BD481 CL")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        assert p.topic == "Order"
+
+    def test_purchase_contract_bed_frame(self):
+        p = _make_proposal(topic="Purchase contract — bed frame and delivery")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        assert p.topic == "Purchase contract"
+
+    def test_visa_mediation_services_invoice(self):
+        p = _make_proposal(topic="Visa mediation services invoice — Russia tourist visa")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        assert p.topic == "Invoice"
+
+    # Additional edge cases from the spec -------------------------------------
+
+    def test_tax_invoice_qualifier_before(self):
+        p = _make_proposal(topic="Tax Invoice")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        assert p.topic == "Invoice"
+
+    def test_invoice_em_dash_detail(self):
+        p = _make_proposal(topic="Invoice — copy")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].severity == "fixed"
+        assert p.topic == "Invoice"
+
+    def test_mri_head_scan_report_unchanged(self):
+        # No matched document-type word — leave unchanged.
+        p = _make_proposal(topic="MRI Head Scan Report")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "MRI Head Scan Report"
+
+    def test_residence_permit_transfer_fee_unchanged(self):
+        p = _make_proposal(topic="Residence permit transfer fee")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Residence permit transfer fee"
+
+    # New type-word coverage --------------------------------------------------
+
+    def test_bare_order_unchanged(self):
+        p = _make_proposal(topic="Order")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Order"
+
+    def test_bare_statement_unchanged(self):
+        p = _make_proposal(topic="Statement")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Statement"
+
+    def test_checking_account_statement_stripped(self):
+        p = _make_proposal(topic="Checking Account Statement — December 2025")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Statement"
+
+    def test_statement_with_period_preserved(self):
+        p = _make_proposal(topic="Checking Account Statement 2025-12")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Statement 2025-12"
+
+    def test_liability_insurance_policy_stripped(self):
+        p = _make_proposal(topic="Liability Insurance Policy — coverage details")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Policy"
+
+    def test_rental_contract_stripped_not_mistaken_for_purchase(self):
+        # Single-word 'Contract' reduces to 'Contract', not 'Purchase contract'.
+        p = _make_proposal(topic="Rental Contract — apartment lease")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Contract"
+
+    def test_purchase_contract_bare_unchanged(self):
+        p = _make_proposal(topic="Purchase contract")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Purchase contract"
+
+    def test_receipt_qualifier_stripped(self):
+        p = _make_proposal(topic="Grocery Receipt")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Receipt"
+
+    def test_case_insensitive_match_emits_canonical(self):
+        p = _make_proposal(topic="tax INVOICE")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Invoice"
 
 
 # ── _check_tags_valid ────────────────────────────────────────────────────────

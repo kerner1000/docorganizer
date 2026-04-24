@@ -365,19 +365,64 @@ def _check_tags_valid(proposal, config: ArchiveConfig) -> list[Issue]:
     return issues
 
 
-def _normalize_invoice_topic(proposal) -> list[Issue]:
-    """Strip descriptive qualifiers from invoice topics — use bare 'Invoice' only.
+# Common document-type words whose topics should reduce to the bare type.
+# Order matters: multi-word types (e.g. "Purchase contract") must be checked
+# BEFORE their single-word counterparts ("Contract") so they match as a unit.
+_DOCUMENT_TYPE_WORDS: tuple[tuple[str, str], ...] = (
+    ("purchase contract", "Purchase contract"),
+    ("invoice", "Invoice"),
+    ("order", "Order"),
+    ("receipt", "Receipt"),
+    ("statement", "Statement"),
+    ("contract", "Contract"),
+    ("policy", "Policy"),
+)
 
-    E.g. 'Language Course Invoice' -> 'Invoice',
-         'Medical Laboratory Invoice 2021-02' -> 'Invoice 2021-02'.
-    Sender field already provides context; topic should not duplicate it.
+# Period suffix at the end of a topic, e.g. " 2023", " 2023-12", " 2021-Q4".
+# Uses the existing lenient pattern (\d[\d\-]*) so Q-suffixed periods keep working.
+_PERIOD_SUFFIX = r"\s+\d[\d\-]*"
+
+
+def _normalize_document_type_topic(proposal) -> list[Issue]:
+    """Strip descriptive qualifiers from common document-type topics.
+
+    Reduces topics like 'Interior design invoice — window treatments',
+    'Tax Invoice', or 'Eyeglasses order and warranty — Fielmann BD481 CL' to
+    the bare canonical type word ('Invoice', 'Order', ...). An optional
+    trailing period suffix (e.g. '2023-12') is preserved so that
+    'Medical Laboratory Invoice 2021-02' becomes 'Invoice 2021-02'.
+
+    Covered types: Invoice, Order, Receipt, Statement, Contract,
+    Purchase contract, Policy. Multi-word types are checked first so they
+    match as a unit (a 'Purchase contract — bed frame' topic reduces to
+    'Purchase contract', not 'Contract').
+
+    The Sender field already provides context; topics should not duplicate it.
     """
     issues = []
     topic = proposal.topic
-    m = re.match(r"^(.+\s)?(Invoice(?:\s+\d[\d\-]*)?)$", topic, re.IGNORECASE)
-    if m and m.group(1):
-        new_topic = m.group(2)
-        new_topic = "Invoice" + new_topic[len("Invoice"):]
+
+    for type_lower, canonical in _DOCUMENT_TYPE_WORDS:
+        # Match "<canonical>" or "<canonical> <period>" as the entire topic,
+        # case-insensitive — already bare, nothing to fix.
+        bare_pattern = rf"^{re.escape(type_lower)}(?:{_PERIOD_SUFFIX})?$"
+        if re.match(bare_pattern, topic, re.IGNORECASE):
+            return issues
+
+        # Match the type as a word somewhere in the topic (word boundaries on
+        # both sides so 'Contract' doesn't accidentally match 'Contracts').
+        word_pattern = rf"\b{re.escape(type_lower)}\b"
+        if not re.search(word_pattern, topic, re.IGNORECASE):
+            continue
+
+        # Preserve a period suffix ONLY when it directly follows the type word
+        # and runs to the end of the topic (e.g. 'Medical Lab Invoice 2021-02'
+        # keeps '2021-02', but 'Account Statement — December 2025' does not —
+        # "December" interrupts the type→period adjacency).
+        direct_period_pattern = rf"\b{re.escape(type_lower)}({_PERIOD_SUFFIX})$"
+        direct_match = re.search(direct_period_pattern, topic, re.IGNORECASE)
+        new_topic = canonical + (direct_match.group(1) if direct_match else "")
+
         issues.append(Issue(
             field="topic",
             severity="fixed",
@@ -386,6 +431,8 @@ def _normalize_invoice_topic(proposal) -> list[Issue]:
             reason=f"Stripped descriptive qualifier — topic reduced to bare '{new_topic}'",
         ))
         proposal.topic = new_topic
+        return issues
+
     return issues
 
 
@@ -479,7 +526,7 @@ def validate_proposals(
         issues.extend(_check_date_format(p))
         issues.extend(_check_person(p, config))
         issues.extend(_check_sender_consistency(p, registry, config))
-        issues.extend(_normalize_invoice_topic(p))
+        issues.extend(_normalize_document_type_topic(p))
         issues.extend(_check_tags_valid(p, config))
         issues.extend(_check_filename_separators(p))
         issues.extend(_check_path_unsafe_chars(p))
