@@ -13,12 +13,14 @@ from docorganizer.validator import (
     _check_batch_topic_drift,
     _check_date_format,
     _check_filename_separators,
+    _check_path_unsafe_chars,
     _check_person,
     _check_sender_consistency,
     _check_tags_valid,
     _normalize_invoice_topic,
     _parse_filename,
     build_sender_registry,
+    sanitize_field,
     validate_proposals,
     format_validation_report,
 )
@@ -359,6 +361,59 @@ class TestCheckFilenameSeparators:
         issues = _check_filename_separators(p)
         assert len(issues) == 1
         assert p.topic == "Medical — Dental Invoice"
+
+
+# ── _check_path_unsafe_chars ─────────────────────────────────────────────────
+
+
+class TestCheckPathUnsafeChars:
+    def test_clean_fields_pass(self):
+        p = _make_proposal(sender="Fielmann", topic="Eyeglasses", person="Alexander")
+        assert _check_path_unsafe_chars(p) == []
+
+    def test_slash_in_sender_replaced(self):
+        p = _make_proposal(sender="Fielmann / EyeKraft Optica")
+        issues = _check_path_unsafe_chars(p)
+        assert len(issues) == 1
+        assert issues[0].field == "sender"
+        assert issues[0].severity == "fixed"
+        assert p.sender == "Fielmann EyeKraft Optica"
+
+    def test_slash_in_topic_replaced(self):
+        p = _make_proposal(topic="Order / Warranty")
+        issues = _check_path_unsafe_chars(p)
+        assert len(issues) == 1
+        assert issues[0].field == "topic"
+        assert p.topic == "Order Warranty"
+
+    def test_backslash_in_person_replaced(self):
+        p = _make_proposal(person="Alex\\ander")
+        issues = _check_path_unsafe_chars(p)
+        assert len(issues) == 1
+        assert issues[0].field == "person"
+        assert p.person == "Alex ander"
+
+    def test_null_byte_replaced(self):
+        p = _make_proposal(sender="Bad\x00Sender")
+        issues = _check_path_unsafe_chars(p)
+        assert len(issues) == 1
+        assert p.sender == "Bad Sender"
+
+    def test_multiple_slashes_collapse_whitespace(self):
+        p = _make_proposal(sender="A / B / C")
+        _check_path_unsafe_chars(p)
+        assert p.sender == "A B C"
+
+    def test_sanitize_field_idempotent(self):
+        assert sanitize_field("clean name") == "clean name"
+        assert sanitize_field("a/b") == "a b"
+        assert sanitize_field(sanitize_field("a/b")) == "a b"
+
+    def test_resulting_filename_has_no_path_separator(self):
+        p = _make_proposal(sender="Fielmann / EyeKraft Optica", topic="Order")
+        _check_path_unsafe_chars(p)
+        assert "/" not in p.filename
+        assert "\\" not in p.filename
 
 
 # ── build_sender_registry ────────────────────────────────────────────────────

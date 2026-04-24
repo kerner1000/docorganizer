@@ -410,6 +410,54 @@ def _check_filename_separators(proposal) -> list[Issue]:
     return issues
 
 
+# Characters that break pathlib.Path.rename() when present in a filename field:
+# "/" and "\" are path separators on POSIX / Windows respectively; NUL terminates
+# C strings and is rejected by the kernel. Replace with a safe alternative
+# rather than failing the whole batch.
+_PATH_UNSAFE_CHARS = ("/", "\\", "\x00")
+
+
+def sanitize_field(value: str) -> str:
+    """Strip path-unsafe characters from a single filename field.
+
+    Replaces "/", "\\", and NUL with a space, then collapses runs of
+    whitespace. Returns the value unchanged if no unsafe char is present.
+    """
+    if not any(c in value for c in _PATH_UNSAFE_CHARS):
+        return value
+    cleaned = value
+    for c in _PATH_UNSAFE_CHARS:
+        cleaned = cleaned.replace(c, " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _check_path_unsafe_chars(proposal) -> list[Issue]:
+    """Auto-fix path-unsafe characters (``/``, ``\\``, NUL) in filename fields.
+
+    A raw ``/`` in a sender or topic causes pathlib to interpret the field as
+    a directory separator at rename time, which either creates unwanted
+    intermediate directories or raises FileNotFoundError and aborts the batch.
+    """
+    issues = []
+    fields = ["sender", "topic"]
+    if proposal.person:
+        fields.append("person")
+    for field_name in fields:
+        value = getattr(proposal, field_name)
+        cleaned = sanitize_field(value)
+        if cleaned != value:
+            issues.append(Issue(
+                field=field_name,
+                severity="fixed",
+                old_value=value,
+                new_value=cleaned,
+                reason="Removed path-unsafe character(s) — '/', '\\\\', or NUL would break filesystem rename",
+            ))
+            setattr(proposal, field_name, cleaned)
+    return issues
+
+
 # ── Main validation entry point ─────────────────────────────────────────────
 
 
@@ -434,6 +482,7 @@ def validate_proposals(
         issues.extend(_normalize_invoice_topic(p))
         issues.extend(_check_tags_valid(p, config))
         issues.extend(_check_filename_separators(p))
+        issues.extend(_check_path_unsafe_chars(p))
         if issues:
             all_issues[i] = issues
 

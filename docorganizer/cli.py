@@ -41,6 +41,7 @@ from docorganizer.translator import (
 from docorganizer.validator import (
     build_sender_registry,
     format_validation_report,
+    sanitize_field,
     validate_proposals,
 )
 
@@ -885,6 +886,12 @@ def execute_all(
         if p.status != "approved":
             continue
 
+        # Defensive sanitization: strip path-unsafe characters right before
+        # rename so a bad proposal that slipped past the validator can't abort
+        # the whole batch. The validator should have caught this already —
+        # this is a belt-and-braces guard.
+        _sanitize_proposal_fields(p)
+
         target_dir = ctx.root / p.target_folder
         target_dir.mkdir(parents=True, exist_ok=True)
         default_target = target_dir / p.filename
@@ -912,27 +919,52 @@ def execute_all(
                 p.status = "skipped"
             continue
 
-        # Resolve name collisions by appending (2), (3), … to the topic.
-        target = _resolve_collision(target_dir, p)
+        try:
+            # Resolve name collisions by appending (2), (3), … to the topic.
+            target = _resolve_collision(target_dir, p)
 
-        # Rename + move in one operation
-        p.original_path.rename(target)
-        apply_tags(target, all_tags)
-        p.status = "executed"
-        executed.append(p)
-        print(f"  Moved: {p.original_path.name} → {p.target_folder}/{p.filename}")
+            # Rename + move in one operation
+            p.original_path.rename(target)
+            apply_tags(target, all_tags)
+            p.status = "executed"
+            executed.append(p)
+            print(f"  Moved: {p.original_path.name} → {p.target_folder}/{p.filename}")
 
-        # Move translated companion file alongside the original
-        if p.translated_path and p.translated_path.exists():
-            translated_target = target_dir / p.translated_filename
-            p.translated_path.rename(translated_target)
-            apply_tags(translated_target, all_tags)
-            print(f"  Moved: {p.translated_path.name} → {p.target_folder}/{p.translated_filename}")
+            # Move translated companion file alongside the original
+            if p.translated_path and p.translated_path.exists():
+                translated_target = target_dir / p.translated_filename
+                p.translated_path.rename(translated_target)
+                apply_tags(translated_target, all_tags)
+                print(f"  Moved: {p.translated_path.name} → {p.target_folder}/{p.translated_filename}")
 
-        if on_executed:
-            on_executed(p)
+            if on_executed:
+                on_executed(p)
+        except (OSError, ValueError) as e:
+            p.status = "error"
+            p.notes = f"{p.notes} [execute error: {e}]".strip()
+            print(
+                f"  ERROR: {p.original_path.name} — {e}. "
+                f"Continuing with remaining proposals."
+            )
+            if on_executed:
+                on_executed(p)
 
     return executed
+
+
+def _sanitize_proposal_fields(p: Proposal) -> None:
+    """In-place strip of path-unsafe chars from filename fields.
+
+    Mirrors validator._check_path_unsafe_chars but without producing Issues —
+    a last-line-of-defence before the rename call so a raw '/' in a sender
+    can't be interpreted as a directory separator by pathlib.
+    """
+    p.sender = sanitize_field(p.sender)
+    p.topic = sanitize_field(p.topic)
+    if p.person:
+        p.person = sanitize_field(p.person)
+    if p.filename_override:
+        p.filename_override = sanitize_field(p.filename_override)
 
 
 # ── Step 6: REPORT ───────────────────────────────────────────────────────────
@@ -1229,8 +1261,15 @@ def _execute_and_report(
     print(f"\n  Intake log updated: {batch_id}")
     report(proposals, flagged, executed, duplicates, ctx)
 
+    errored = [p for p in proposals if p.status == "error"]
     if flush_target.exists():
-        flush_target.unlink()
+        if errored:
+            print(
+                f"\n  {len(errored)} proposal(s) failed to execute — "
+                f"preserving {flush_target.name} for review."
+            )
+        else:
+            flush_target.unlink()
 
 
 def _resolve_archive_root(args: list[str]) -> tuple[Path, list[str]]:
