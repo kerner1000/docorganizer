@@ -70,6 +70,7 @@ class Proposal:
     status: str = "proposed"  # proposed, approved, corrected, skipped
     translated_path: Path | None = None  # companion translated document
     filename_override: str | None = None  # explicit filename set by user; bypasses synthesis
+    file_hash: str | None = None  # SHA-256 of source file; used to recover from corrupted original_path
 
     @property
     def synthesized_filename(self) -> str:
@@ -120,6 +121,8 @@ class Proposal:
             d["translated_path"] = str(self.translated_path)
         if self.filename_override is not None:
             d["filename_override"] = self.filename_override
+        if self.file_hash is not None:
+            d["file_hash"] = self.file_hash
         return d
 
     @classmethod
@@ -140,6 +143,7 @@ class Proposal:
             status=d.get("status", "approved"),
             translated_path=Path(translated) if translated else None,
             filename_override=d.get("filename_override"),
+            file_hash=d.get("file_hash"),
         )
         # Back-compat: if the user edited ``proposed_filename`` to a name that
         # doesn't match the synthesis pattern, honor it as an override.
@@ -545,6 +549,12 @@ def _build_proposal(
     if config.date_subfolders:
         target_folder = f"{target_folder}/{date_to_subfolder(data.get('date', 'Undated'))}"
 
+    try:
+        file_hash = compute_file_hash(path)
+    except OSError:
+        # Best-effort: hash is used only for recovery; never block propose on it.
+        file_hash = None
+
     return Proposal(
         original_path=path,
         sender=data["sender"],
@@ -557,6 +567,7 @@ def _build_proposal(
         tags=tags,
         confidence=data["confidence"],
         notes=data.get("notes", ""),
+        file_hash=file_hash,
     )
 
 
@@ -881,6 +892,31 @@ def _resolve_collision(target_dir: Path, proposal: Proposal) -> Path:
         n += 1
 
 
+def _recover_by_hash(proposal: Proposal, ctx: ArchiveContext) -> Path | None:
+    """Find an inbox file whose SHA-256 matches ``proposal.file_hash``.
+
+    Used when ``original_path`` no longer exists — typically because a user
+    or agent edited proposals.json and the source filename was rewritten as
+    a side-effect (e.g. global replace-all on a string that also appeared
+    in the path). Returns the matching inbox path, or None if not found.
+    """
+    if not proposal.file_hash:
+        return None
+    if not ctx.inbox.exists():
+        return None
+    for candidate in ctx.inbox.iterdir():
+        if not candidate.is_file():
+            continue
+        if candidate.name.startswith("."):
+            continue
+        try:
+            if compute_file_hash(candidate) == proposal.file_hash:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def execute_all(
     proposals: list[Proposal],
     ctx: ArchiveContext,
@@ -921,13 +957,26 @@ def execute_all(
                 )
                 if on_executed:
                     on_executed(p)
+                continue
+
+            # Recovery: original_path was corrupted (e.g. user-edited JSON
+            # accidentally rewrote the source filename). If a content hash
+            # was stored at propose-time, scan the inbox for a matching file.
+            recovered = _recover_by_hash(p, ctx)
+            if recovered is not None:
+                print(
+                    f"  RECOVERED: {p.original_path.name} → {recovered.name} "
+                    f"(matched by content hash)"
+                )
+                p.original_path = recovered
+                # fall through to the normal move path below
             else:
                 print(
                     f"  MISSING: {p.original_path.name} "
                     f"— not in inbox or target, skipping"
                 )
                 p.status = "skipped"
-            continue
+                continue
 
         try:
             # Resolve name collisions by appending (2), (3), … to the topic.
