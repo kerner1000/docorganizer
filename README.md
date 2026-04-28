@@ -158,6 +158,7 @@ docorganizer --archive /path/to/MyArchive --propose
 | `archive_dir` | no | `_archive` | Archive directory name |
 | `intake_log` | no | `intake-log.md` | Intake log filename |
 | `todo_dir` | no | `ToDo` | Directory for files needing manual review |
+| `non_archive_dir` | no | *(disabled)* | Path (relative to archive root) where the classifier may route documents it judges as non-archivable (templates, working drafts, blank scans). When unset, every readable document must be filed. |
 
 ## File naming convention
 
@@ -220,6 +221,61 @@ MyArchive/
   _archive/
   intake-log.md
 ```
+
+## Per-archive plugin
+
+When an archive directory contains `docorganizer_plugin.py` next to its
+`docorganizer.yaml`, that module is auto-loaded and its hooks are called at
+designated points in the pipeline. This keeps the core generic — vendor-specific
+quirks (sender name canonicalization, paired-document alignment, custom
+supersedence rules) live with each archive instead of in the tool.
+
+Two optional hooks:
+
+```python
+# my_archive/docorganizer_plugin.py
+from docorganizer.cli import Proposal
+
+
+def post_propose(proposal: Proposal, text: str) -> Proposal:
+    """Called once per proposal after LLM classification.
+    Use for single-document rewrites: canonicalize sender name,
+    derive disambiguator from text, set document_id, etc.
+    """
+    if proposal.sender == "Acme Inc, formerly known as Foo":
+        proposal.sender = "Acme Inc"
+    return proposal
+
+
+def post_batch(proposals: list[Proposal]) -> list[Proposal]:
+    """Called once with the full batch, after supersedence detection.
+    Use for cross-document patterns: invoice/receipt pairing,
+    sibling normalization, etc.
+    """
+    # … cross-document logic …
+    return proposals
+```
+
+Both hooks are optional — define only what you need. A broken plugin produces
+a stderr warning and is silently skipped (it never blocks document processing).
+
+## Built-in cross-document features
+
+These work without any plugin — they are part of the core pipeline:
+
+- **Text-hash deduplication** — files that share rendered text but differ in
+  PDF metadata (timestamps, producer string, re-renders) are detected as
+  duplicates and routed to `_archive/inbox/` alongside byte-identical dupes.
+- **Supersedence by `document_id`** — when the classifier extracts a stable
+  identifier (offer #, contract #, invoice #) and an older file in the archive
+  has the same ID in its name, the older file is moved to `_archive/` with a
+  ` Superseded` suffix when the new one is filed.
+- **Disambiguator field** — the classifier may attach a short signal
+  (`USD 11.35`, `Q1 2026`, `#2104541`) to distinguish documents that would
+  otherwise produce identical filenames within the same `(date, sender)`.
+- **Non-archive routing** — when `non_archive_dir` is configured, the
+  classifier may route working drafts, templates, blank scans, etc. to that
+  directory instead of forcing them into the partner-folder hierarchy.
 
 ## Development
 

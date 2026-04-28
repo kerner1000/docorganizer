@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from docorganizer.extractor import (
     SUPPORTED_EXTENSIONS,
     ExtractionError,
     UnsupportedFileType,
+    compute_text_hash,
     extract_text,
 )
 from docorganizer.translator import (
@@ -71,11 +73,18 @@ class Proposal:
     translated_path: Path | None = None  # companion translated document
     filename_override: str | None = None  # explicit filename set by user; bypasses synthesis
     file_hash: str | None = None  # SHA-256 of source file; used to recover from corrupted original_path
+    disambiguator: str | None = None  # short signal appended to topic (e.g. "USD 11.35", "Q1 2026")
+    non_archive_reason: str | None = None  # if set, route to config.non_archive_dir instead of partner folder
+    document_id: str | None = None  # stable identifier (offer #, contract #, invoice #) — used for supersedence detection
+    supersedes: list[Path] = field(default_factory=list)  # archived files to move to _archive/ when this one is filed
 
     @property
     def synthesized_filename(self) -> str:
         """The filename derived from the structured fields (date, sender, topic, person)."""
-        base = f"{self.date} - {self.sender} - {self.topic}"
+        topic = self.topic
+        if self.disambiguator:
+            topic = f"{topic} {self.disambiguator}"
+        base = f"{self.date} - {self.sender} - {topic}"
         if self.person:
             base += f" - {self.person}"
         return base + self.original_path.suffix
@@ -123,6 +132,14 @@ class Proposal:
             d["filename_override"] = self.filename_override
         if self.file_hash is not None:
             d["file_hash"] = self.file_hash
+        if self.disambiguator is not None:
+            d["disambiguator"] = self.disambiguator
+        if self.non_archive_reason is not None:
+            d["non_archive_reason"] = self.non_archive_reason
+        if self.document_id is not None:
+            d["document_id"] = self.document_id
+        if self.supersedes:
+            d["supersedes"] = [str(p) for p in self.supersedes]
         return d
 
     @classmethod
@@ -144,6 +161,10 @@ class Proposal:
             translated_path=Path(translated) if translated else None,
             filename_override=d.get("filename_override"),
             file_hash=d.get("file_hash"),
+            disambiguator=d.get("disambiguator"),
+            non_archive_reason=d.get("non_archive_reason"),
+            document_id=d.get("document_id"),
+            supersedes=[Path(p) for p in d.get("supersedes", [])],
         )
         # Back-compat: if the user edited ``proposed_filename`` to a name that
         # doesn't match the synthesis pattern, honor it as an override.
@@ -170,8 +191,9 @@ class RefactorMove:
 class DuplicateFile:
     inbox_path: Path
     existing_path: Path
-    file_hash: str
+    file_hash: str  # Either a SHA-256 of file bytes or of normalized text — see ``match_type``.
     archived_to: Path | None = None
+    match_type: str = "bytes"  # "bytes" (byte-for-byte identical) or "text" (same rendered text, different metadata)
 
 
 # ── Step 1: SCAN ─────────────────────────────────────────────────────────────
@@ -225,18 +247,8 @@ def compute_file_hash(path: Path) -> str:
     return sha256.hexdigest()
 
 
-def find_duplicates(
-    inbox_files: list[Path], ctx: ArchiveContext,
-) -> tuple[list[DuplicateFile], list[Path]]:
-    """Check inbox files against existing filed documents and each other.
-
-    Returns (duplicates, remaining) where remaining are non-duplicate
-    files that should proceed to extraction.
-    """
-    existing_hashes: dict[str, Path] = {}
-    # In flat layout (root_folder == root), exclude tool directories from the root scan
-    # so inbox/archive/todo files aren't treated as existing filed documents.
-    # The archive is scanned separately as its own search_root without exclusions.
+def _iter_existing_documents(ctx: ArchiveContext):
+    """Yield every filed/archived document path under the archive context."""
     exclude_dirs = (
         {ctx.root / name for name in ctx.tool_dir_names}
         if ctx.root_folder == ctx.root
@@ -247,32 +259,103 @@ def find_duplicates(
             continue
         skip = exclude_dirs if search_root == ctx.root_folder else set()
         for path in search_root.rglob("*"):
-            if path.is_file() and not path.name.startswith("."):
-                if skip and any(path.is_relative_to(d) for d in skip):
-                    continue
-                existing_hashes[compute_file_hash(path)] = path
+            if not (path.is_file() and not path.name.startswith(".")):
+                continue
+            if skip and any(path.is_relative_to(d) for d in skip):
+                continue
+            yield path
+
+
+def find_duplicates(
+    inbox_files: list[Path], ctx: ArchiveContext,
+) -> tuple[list[DuplicateFile], list[Path]]:
+    """Check inbox files against existing filed documents and each other.
+
+    Two passes:
+    1. Byte-hash (SHA-256 of raw bytes) — catches exact re-downloads.
+    2. Text-hash (SHA-256 of normalized rendered text) — catches re-renders
+       with different PDF metadata/timestamps but identical content.
+
+    Returns (duplicates, remaining) where remaining are non-duplicate files
+    that should proceed to extraction.
+    """
+    existing_paths = list(_iter_existing_documents(ctx))
+    existing_byte_hashes: dict[str, Path] = {
+        compute_file_hash(path): path for path in existing_paths
+    }
 
     duplicates: list[DuplicateFile] = []
     remaining: list[Path] = []
-    seen_in_batch: dict[str, Path] = {}
+    seen_byte_in_batch: dict[str, Path] = {}
+
+    # Inbox files needing the text-hash secondary check
+    text_check_queue: list[tuple[Path, str]] = []  # (inbox_path, byte_hash)
 
     for inbox_file in inbox_files:
-        file_hash = compute_file_hash(inbox_file)
+        byte_hash = compute_file_hash(inbox_file)
 
-        if file_hash in existing_hashes:
+        if byte_hash in existing_byte_hashes:
             duplicates.append(DuplicateFile(
                 inbox_path=inbox_file,
-                existing_path=existing_hashes[file_hash],
-                file_hash=file_hash,
+                existing_path=existing_byte_hashes[byte_hash],
+                file_hash=byte_hash,
+                match_type="bytes",
             ))
-        elif file_hash in seen_in_batch:
+            continue
+        if byte_hash in seen_byte_in_batch:
             duplicates.append(DuplicateFile(
                 inbox_path=inbox_file,
-                existing_path=seen_in_batch[file_hash],
-                file_hash=file_hash,
+                existing_path=seen_byte_in_batch[byte_hash],
+                file_hash=byte_hash,
+                match_type="bytes",
+            ))
+            continue
+
+        seen_byte_in_batch[byte_hash] = inbox_file
+        text_check_queue.append((inbox_file, byte_hash))
+
+    if not text_check_queue:
+        return duplicates, remaining
+
+    # Lazy text-hash: only computed when at least one inbox file passed the
+    # byte-hash check (otherwise we'd pay the extraction cost for nothing).
+    inbox_text_hashes: dict[Path, str] = {}
+    for inbox_file, _ in text_check_queue:
+        text_hash = compute_text_hash(inbox_file)
+        if text_hash is not None:
+            inbox_text_hashes[inbox_file] = text_hash
+
+    existing_text_hashes: dict[str, Path] = {}
+    if inbox_text_hashes:
+        for path in existing_paths:
+            text_hash = compute_text_hash(path)
+            if text_hash is not None:
+                # Last write wins on collision — for true content-duplicates
+                # within the archive, either path is a valid match target.
+                existing_text_hashes[text_hash] = path
+
+    seen_text_in_batch: dict[str, Path] = {}
+    for inbox_file, _ in text_check_queue:
+        text_hash = inbox_text_hashes.get(inbox_file)
+        if text_hash is None:
+            remaining.append(inbox_file)
+            continue
+        if text_hash in existing_text_hashes:
+            duplicates.append(DuplicateFile(
+                inbox_path=inbox_file,
+                existing_path=existing_text_hashes[text_hash],
+                file_hash=text_hash,
+                match_type="text",
+            ))
+        elif text_hash in seen_text_in_batch:
+            duplicates.append(DuplicateFile(
+                inbox_path=inbox_file,
+                existing_path=seen_text_in_batch[text_hash],
+                file_hash=text_hash,
+                match_type="text",
             ))
         else:
-            seen_in_batch[file_hash] = inbox_file
+            seen_text_in_batch[text_hash] = inbox_file
             remaining.append(inbox_file)
 
     return duplicates, remaining
@@ -448,11 +531,29 @@ def _build_prompt(
         person_field = ""
         naming_convention = "[Date] - [Sender] - [Topic].[ext]"
 
+    non_archive_field = ""
+    non_archive_section = ""
+    if config.non_archive_dir:
+        non_archive_field = (
+            '"non_archive_reason": "short reason if this document should NOT be filed (or null)", '
+        )
+        non_archive_section = (
+            f"\nNON-ARCHIVE — set ``non_archive_reason`` (otherwise leave null) when the document is "
+            f"clearly not a partner/business record worth filing: blank scans, working drafts of letters, "
+            f"templates, screenshots, internal notes, or anything that ended up in the inbox by mistake. "
+            f"When set, the file is moved to ``{config.non_archive_dir}/`` instead of the archive. "
+            f"All other classification fields (sender/topic/etc.) may be set best-effort or left empty — "
+            f"they are not used when non_archive_reason is present.\n"
+        )
+
     json_example = (
         f'{{"date": "...", "sender": "...", "topic": "...", {person_json}'
         f'"country": "{country_choices}", '
         f'"folder_topic": "short folder name for this document\'s topic", '
         f'"tags": [], "confidence": "High|Medium|Low", '
+        f'"disambiguator": "short signal that distinguishes this doc from same-day same-topic siblings, or null", '
+        f'"document_id": "stable identifier visible on the document (offer #, contract #, invoice #, reference #), or null", '
+        f'{non_archive_field}'
         f'"notes": "brief explanation of your reasoning"}}'
     )
 
@@ -489,6 +590,19 @@ EXISTING FOLDERS (reuse if appropriate):
 
 TAGS — apply only from this list, only when clearly relevant:
 {tags_block}
+
+{non_archive_section}DOCUMENT_ID — set when the document carries a stable, vendor-issued identifier:
+- Offer numbers, contract numbers, invoice numbers, reference numbers, ticket IDs, etc.
+- Use the value EXACTLY as printed (e.g. "362283", "S5DKLG1Q-0014", "RE001454", "#2104541").
+- This enables supersedence detection: when a newer version of the same document arrives, the older one is moved to the archive's superseded folder.
+- Leave null when no such identifier is visible.
+
+DISAMBIGUATOR — set when the topic alone won't be unique within the same (date, sender):
+- Multiple charges from the same vendor on the same day → use a brief amount signal: `"USD 11.35"`, `"EUR 488.13"`, `"CHF 65.95"`.
+- Multiple statements/reports for different periods issued the same day → use the period: `"Q1 2026"`, `"2025-12"`.
+- Multiple documents with stable identifiers (invoice numbers, contract IDs) → use the short trailing digits: `"0014"`, `"#2104541"`.
+- For invoice + receipt pairs covering the SAME charge (same invoice number from the same sender), use the SAME disambiguator on both — they sort together that way.
+- Leave null when topic+date+sender is already unique. Do NOT pad the filename with redundant words.
 
 CONFIDENCE:
 - High: all four fields clearly identified from document content
@@ -555,6 +669,25 @@ def _build_proposal(
         # Best-effort: hash is used only for recovery; never block propose on it.
         file_hash = None
 
+    disambiguator = data.get("disambiguator")
+    if isinstance(disambiguator, str):
+        disambiguator = disambiguator.strip() or None
+
+    non_archive_reason = data.get("non_archive_reason")
+    if isinstance(non_archive_reason, str):
+        non_archive_reason = non_archive_reason.strip() or None
+
+    document_id = data.get("document_id")
+    if isinstance(document_id, str):
+        document_id = document_id.strip() or None
+
+    # Non-archive routing overrides target_folder and preserves the original
+    # filename — the file is being disposed of, not filed for retrieval.
+    filename_override = None
+    if non_archive_reason and config.non_archive_dir:
+        target_folder = config.non_archive_dir
+        filename_override = path.name
+
     return Proposal(
         original_path=path,
         sender=data["sender"],
@@ -568,7 +701,91 @@ def _build_proposal(
         confidence=data["confidence"],
         notes=data.get("notes", ""),
         file_hash=file_hash,
+        disambiguator=disambiguator,
+        non_archive_reason=non_archive_reason,
+        document_id=document_id,
+        filename_override=filename_override,
     )
+
+
+_FILENAME_DATE_RE = re.compile(r"^(\d{4}(?:-\d{1,2}(?:-\d{1,2})?)?)\b")
+_DOC_ID_MIN_LENGTH = 4  # below this, false-positive substring matches are too likely
+
+
+def _parse_filename_date(name: str) -> str | None:
+    """Extract the leading ISO date prefix (YYYY[-MM[-DD]]) from a filename, or None."""
+    m = _FILENAME_DATE_RE.match(name)
+    return m.group(1) if m else None
+
+
+def detect_supersedence(
+    proposals: list[Proposal], ctx: ArchiveContext,
+) -> None:
+    """Mark older archived documents as superseded by newer same-id proposals.
+
+    For each proposal carrying a ``document_id``:
+    1. Scan the archive for filenames containing that ID as a substring.
+    2. For each match, parse the leading date prefix from its filename.
+    3. If the archived file's date is strictly older than the new proposal's
+       date, append it to ``proposal.supersedes``.
+
+    Conservative: short IDs (under ``_DOC_ID_MIN_LENGTH`` chars) are ignored,
+    and matches where the date can't be parsed or isn't older are ignored.
+    The execute step moves each ``supersedes`` entry into ``_archive/`` with
+    a "Superseded" suffix on the filename stem.
+    """
+    candidates_by_id: dict[str, list[Path]] = {}
+    paths = list(_iter_existing_documents(ctx))
+    for p in proposals:
+        if not p.document_id or p.non_archive_reason:
+            continue
+        doc_id = p.document_id
+        if len(doc_id) < _DOC_ID_MIN_LENGTH:
+            continue
+
+        matches = candidates_by_id.get(doc_id)
+        if matches is None:
+            matches = [path for path in paths if doc_id in path.name]
+            candidates_by_id[doc_id] = matches
+
+        new_date = p.date or ""
+        for archived in matches:
+            old_date = _parse_filename_date(archived.name)
+            if old_date is None or new_date == "" or old_date >= new_date:
+                continue
+            if archived not in p.supersedes:
+                p.supersedes.append(archived)
+
+
+def _archive_superseded(path: Path, ctx: ArchiveContext) -> Path:
+    """Move ``path`` into ``_archive/`` mirroring its current relative location.
+
+    Adds a " Superseded" suffix to the stem. Returns the new path.
+    """
+    try:
+        rel = path.relative_to(ctx.root_folder)
+    except ValueError:
+        # Already under archive (or outside the filing root) — mirror from ctx.root.
+        rel = path.relative_to(ctx.root) if path.is_relative_to(ctx.root) else Path(path.name)
+
+    target_dir = ctx.archive / rel.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    new_name = f"{path.stem} Superseded{path.suffix}"
+    target = target_dir / new_name
+
+    # Avoid collision if the same supersedence runs twice or there's already
+    # a Superseded file with the same name.
+    if target.exists():
+        n = 2
+        while True:
+            candidate = target_dir / f"{path.stem} Superseded ({n}){path.suffix}"
+            if not candidate.exists():
+                target = candidate
+                break
+            n += 1
+
+    path.rename(target)
+    return target
 
 
 def apply_three_document_rule(
@@ -589,6 +806,8 @@ def apply_three_document_rule(
 
     prefix = ctx.config.root_folder_prefix
     for p in proposals:
+        if p.non_archive_reason:
+            continue
         if p.folder_topic == "Unsorted":
             continue
 
@@ -642,6 +861,8 @@ def apply_business_routing(proposal: Proposal, text: str, config: ArchiveConfig)
 
     Returns the name of the rule applied, or None.
     """
+    if proposal.non_archive_reason:
+        return None
     rule = _match_business_routing(text, config)
     if rule is None:
         return None
@@ -662,6 +883,7 @@ def propose_all(
 ) -> list[Proposal]:
     """Generate proposals for all successfully extracted files."""
     existing = get_existing_structure(ctx)
+    plugin = ctx.plugin
     proposals = []
 
     for ext in extractions:
@@ -673,6 +895,11 @@ def propose_all(
             proposal = _build_proposal(ext.path, data, ctx.config)
             proposal.translated_path = ext.translated_path
             routed = apply_business_routing(proposal, ext.text, ctx.config)
+            if plugin.post_propose is not None:
+                try:
+                    proposal = plugin.post_propose(proposal, ext.text)
+                except Exception as e:
+                    print(f"\n  Warning: post_propose hook raised {e!r} — keeping unmodified proposal", file=sys.stderr)
             proposals.append(proposal)
             suffix = f" [routed: {routed}]" if routed else ""
             print(f"OK ({proposal.confidence}){suffix}")
@@ -680,6 +907,12 @@ def propose_all(
             print(f"FAILED — {e}")
 
     apply_three_document_rule(proposals, ctx)
+    detect_supersedence(proposals, ctx)
+    if plugin.post_batch is not None:
+        try:
+            proposals = plugin.post_batch(proposals)
+        except Exception as e:
+            print(f"  Warning: post_batch hook raised {e!r} — keeping batch unchanged", file=sys.stderr)
     return proposals
 
 
@@ -706,6 +939,7 @@ def save_proposals(
                 "inbox_path": str(d.inbox_path),
                 "existing_path": str(d.existing_path),
                 "hash": d.file_hash,
+                "match_type": d.match_type,
             }
             for d in duplicates
         ],
@@ -729,6 +963,7 @@ def load_proposals(
             inbox_path=Path(d["inbox_path"]),
             existing_path=Path(d["existing_path"]),
             file_hash=d["hash"],
+            match_type=d.get("match_type", "bytes"),
         )
         for d in data.get("duplicates", [])
     ]
@@ -747,7 +982,8 @@ def display_proposals(
     if duplicates:
         print("\n── Duplicates (will be archived) ────────────────────────")
         for d in duplicates:
-            print(f"  {d.inbox_path.name}")
+            label = "byte-identical" if d.match_type == "bytes" else "text-identical (metadata differs)"
+            print(f"  {d.inbox_path.name}  [{label}]")
             print(f"    Duplicate of: {d.existing_path}")
             print(f"    Will move to: _archive/inbox/{d.inbox_path.name}")
 
@@ -765,12 +1001,20 @@ def display_proposals(
     print("\n── Proposals ───────────────────────────────────────────────")
     for i, p in enumerate(proposals, 1):
         print(f"\n  [{i}] {p.original_path.name}")
+        if p.non_archive_reason:
+            print(f"      → {p.target_folder}/{p.filename}  [non-archive disposal]")
+            print(f"      Reason:     {p.non_archive_reason}")
+            continue
         print(f"      → {p.filename}")
         if p.translated_path:
             print(f"      + {p.translated_filename}")
         print(f"      Folder:     {p.target_folder}/")
         print(f"      Tags:       {', '.join(p.tags) if p.tags else '(none)'}")
         print(f"      Confidence: {p.confidence}")
+        if p.supersedes:
+            print(f"      Supersedes: {len(p.supersedes)} file(s) (will move to _archive/)")
+            for old in p.supersedes:
+                print(f"                  - {old}")
         print(f"      Notes:      {p.notes}")
 
 
@@ -995,15 +1239,26 @@ def execute_all(
                 continue
 
         try:
+            # Move any superseded files into _archive first, so a same-name new
+            # file can take their slot without collision.
+            for old in list(p.supersedes):
+                if not old.exists():
+                    continue
+                archived_to = _archive_superseded(old, ctx)
+                print(f"  Superseded: {old.name} → {archived_to.relative_to(ctx.root)}")
+
             # Resolve name collisions by appending (2), (3), … to the topic.
             target = _resolve_collision(target_dir, p)
 
             # Rename + move in one operation
             p.original_path.rename(target)
-            apply_tags(target, all_tags)
+            # Non-archive disposals don't get archive tags.
+            if not p.non_archive_reason:
+                apply_tags(target, all_tags)
             p.status = "executed"
             executed.append(p)
-            print(f"  Moved: {p.original_path.name} → {p.target_folder}/{p.filename}")
+            label = "Disposed" if p.non_archive_reason else "Moved"
+            print(f"  {label}: {p.original_path.name} → {p.target_folder}/{p.filename}")
 
             # Move translated companion file alongside the original
             if p.translated_path and p.translated_path.exists():
@@ -1076,6 +1331,13 @@ def write_intake_log(
     lines = [f"## {batch_id}\n"]
 
     for p in executed:
+        if p.non_archive_reason:
+            lines.append(f"### NON-ARCHIVE: {p.original_path.name}")
+            lines.append(f"- Original:    inbox/{p.original_path.name}")
+            lines.append(f"- Disposed to: {p.target_folder}/{p.filename}")
+            lines.append(f"- Reason:      {p.non_archive_reason}")
+            lines.append("")
+            continue
         lines.append(f"### {p.filename}")
         lines.append(f"- Original:    inbox/{p.original_path.name}")
         lines.append(f"- Moved to:    {p.target_folder}/")
@@ -1089,6 +1351,7 @@ def write_intake_log(
     for d in duplicates:
         lines.append(f"### DUPLICATE: {d.inbox_path.name}")
         lines.append(f"- Original:    inbox/{d.inbox_path.name}")
+        lines.append(f"- Match type:  {d.match_type}")
         lines.append(f"- Duplicate of: {d.existing_path}")
         if d.archived_to:
             lines.append(f"- Archived to: {d.archived_to}")

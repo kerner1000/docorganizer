@@ -1,5 +1,6 @@
 """Text extraction from PDF and DOCX files."""
 
+import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -119,6 +120,39 @@ def _ocr_pdf(path: Path) -> str:
                 continue
 
         return "\n\n".join(t for t in page_texts if t).strip()
+
+
+_MIN_TEXT_HASH_LENGTH = 32
+
+
+def compute_text_hash(path: Path) -> str | None:
+    """Compute a SHA-256 over the normalized rendered text of a document.
+
+    Two files that render to identical text — even when their PDF metadata,
+    producer strings, or generation timestamps differ — produce the same
+    text hash. Used as a second-pass duplicate check after byte-hash misses.
+
+    Returns None when:
+    - The file is not a supported type (only PDF/DOCX are extracted).
+    - Extraction fails for any reason (encrypted, corrupted, image-only without OCR).
+    - The normalized text is shorter than ``_MIN_TEXT_HASH_LENGTH`` characters
+      (too little signal — risks false-positive dedup against other near-empty docs).
+
+    Normalization collapses any run of whitespace to a single space and strips
+    leading/trailing whitespace; case and punctuation are preserved.
+    """
+    try:
+        text = extract_text(path)
+    except (FileNotFoundError, UnsupportedFileType, ExtractionError):
+        return None
+    except Exception:
+        # Defensive: text-hash is best-effort; never raise from this helper.
+        return None
+
+    normalized = " ".join(text.split())
+    if len(normalized) < _MIN_TEXT_HASH_LENGTH:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _extract_docx(path: Path) -> str:

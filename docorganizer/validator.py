@@ -522,6 +522,10 @@ def validate_proposals(
     all_issues: dict[int, list[Issue]] = {}
 
     for i, p in enumerate(proposals):
+        # Non-archive disposals keep the original filename and don't get filed —
+        # the field-level naming/topic checks don't apply.
+        if getattr(p, "non_archive_reason", None):
+            continue
         issues = []
         issues.extend(_check_date_format(p))
         issues.extend(_check_person(p, config))

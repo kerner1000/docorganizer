@@ -1,6 +1,7 @@
 """Archive configuration loaded from docorganizer.yaml."""
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 import yaml
@@ -65,6 +66,12 @@ class ArchiveConfig:
     intake_log: str = "intake-log.md"
     todo_dir: str = "ToDo"
     date_subfolders: bool = False
+
+    # Optional destination for documents the classifier judges as non-archivable
+    # (e.g. blank scans, working drafts, templates accidentally dropped in inbox).
+    # Path is relative to archive root. When None, the option is not offered to
+    # the classifier — every readable document must be filed.
+    non_archive_dir: str | None = None
 
     # Translation: auto-translate documents in specified source languages via DeepL
     translation_target: str = ""  # e.g. "EN-US" — empty means translation disabled
@@ -149,6 +156,17 @@ class ArchiveContext:
     def refactor_file(self) -> Path:
         return self.root / "refactor.json"
 
+    @cached_property
+    def plugin(self):
+        """Lazy-load the per-archive ``docorganizer_plugin.py`` if present.
+
+        Returns an empty ``Plugin`` (all hooks None) when no plugin file
+        exists in the archive root. Import is lazy so tests that never
+        touch a plugin pay no cost.
+        """
+        from docorganizer.plugin import load_plugin
+        return load_plugin(self.root)
+
 
 def load_config(archive_root: Path) -> ArchiveConfig:
     """Load archive configuration from docorganizer.yaml.
@@ -195,4 +213,5 @@ def load_config(archive_root: Path) -> ArchiveConfig:
         translation_target=translation.get("target_language", ""),
         translation_sources=translation.get("source_languages", []),
         business_routing=business_routing,
+        non_archive_dir=raw.get("non_archive_dir"),
     )
