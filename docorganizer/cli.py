@@ -592,6 +592,20 @@ def apply_three_document_rule(
         if p.folder_topic == "Unsorted":
             continue
 
+        # Skip if target_folder was overridden to a non-standard location
+        # (e.g. by business_routing to "ToDo/Stratech") — the three-document
+        # rule only governs the default country/folder_topic layout.
+        # Note: date_subfolders mode appends "/YYYY-MM" to the expected base,
+        # so accept that as a normal (non-override) shape.
+        if p.country:
+            expected = f"{prefix}{p.country}/{p.folder_topic}"
+        else:
+            expected = f"{prefix}{p.folder_topic}"
+        if p.target_folder != expected and not p.target_folder.startswith(
+            expected + "/"
+        ):
+            continue
+
         if p.country:
             folder_path = ctx.root_folder / p.country / p.folder_topic
         else:
@@ -638,6 +652,8 @@ def apply_business_routing(proposal: Proposal, text: str, config: ArchiveConfig)
             proposal.tags.append(tag)
     if rule.override_person:
         proposal.person = rule.override_person
+    if rule.override_sender:
+        proposal.sender = rule.override_sender
     return rule.name
 
 

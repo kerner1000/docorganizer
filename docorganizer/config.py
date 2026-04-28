@@ -41,6 +41,7 @@ class BusinessRoutingRule:
     target_folder: str
     append_tags: list[str] = field(default_factory=list)
     override_person: str | None = None
+    override_sender: str | None = None
 
 
 @dataclass
@@ -173,6 +174,7 @@ def load_config(archive_root: Path) -> ArchiveConfig:
             target_folder=r["target_folder"],
             append_tags=r.get("append_tags", []),
             override_person=r.get("override_person"),
+            override_sender=r.get("override_sender"),
         )
         for r in raw.get("business_routing", [])
     ]

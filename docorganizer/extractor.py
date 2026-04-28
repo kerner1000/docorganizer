@@ -19,7 +19,7 @@ class UnsupportedFileType(Exception):
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx"}
 
-OCR_LANGUAGES = "deu+eng+lav"
+OCR_LANGUAGES = "deu+eng+lav+rus"
 OCR_DPI = 300
 
 
