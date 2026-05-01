@@ -143,6 +143,44 @@ class TestTranslateDocument:
         with pytest.raises(TranslationError, match="API error"):
             translate_document(source, "EN-US", translator)
 
+    def test_raises_translation_error_on_timeout(self, tmp_path):
+        source = tmp_path / "doc.pdf"
+        source.write_text("content")
+
+        translator = MagicMock()
+        translator.translate_document_from_filepath.side_effect = (
+            TimeoutError("Operation timed out")
+        )
+
+        with pytest.raises(TranslationError, match="Network/timeout"):
+            translate_document(source, "EN-US", translator)
+
+    def test_cleans_up_partial_output_on_failure(self, tmp_path):
+        import deepl
+
+        source = tmp_path / "doc.pdf"
+        source.write_text("content")
+
+        def write_partial_then_fail(src, out, **kw):
+            Path(out).write_text("partial download...")
+            raise deepl.DocumentTranslationException(
+                "stalled mid-download", document_handle=None,
+            )
+
+        translator = MagicMock()
+        translator.translate_document_from_filepath.side_effect = (
+            write_partial_then_fail
+        )
+
+        expected_partial = tmp_path / "doc [EN].pdf"
+
+        with pytest.raises(TranslationError):
+            translate_document(source, "EN-US", translator)
+
+        assert not expected_partial.exists(), (
+            "Partial output file must be removed on failure"
+        )
+
 
 # ── Config ──────────────────────────────────────────────────────────────────
 

@@ -454,6 +454,10 @@ def translate_all(
             # Document translated but text extraction from translation failed;
             # keep the translated file but use original text for classification.
             print(f"OK (translated file saved, but text re-extraction failed: {exc})")
+        except Exception as exc:
+            # Defense-in-depth: never let a single document abort the whole batch.
+            print(f"FAILED — unexpected error: {exc}")
+            print(f"    (original text will be used for classification)")
 
 
 # ── Step 3: PROPOSE ──────────────────────────────────────────────────────────

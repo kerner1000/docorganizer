@@ -59,12 +59,26 @@ def translate_document(
             target_lang=target_lang,
         )
     except deepl.DocumentTranslationException as exc:
+        _remove_partial_output(output_path)
         raise TranslationError(
             f"DeepL document translation failed for {source_path.name}: {exc}"
         ) from exc
     except deepl.DeepLException as exc:
+        _remove_partial_output(output_path)
         raise TranslationError(
             f"DeepL API error for {source_path.name}: {exc}"
         ) from exc
+    except (TimeoutError, OSError) as exc:
+        # requests.exceptions.Timeout / ConnectionError inherit from OSError;
+        # the DeepL SDK can let these escape during long-poll or download
+        # without wrapping them in DocumentTranslationException.
+        _remove_partial_output(output_path)
+        raise TranslationError(
+            f"Network/timeout error translating {source_path.name}: {exc}"
+        ) from exc
 
     return output_path
+
+
+def _remove_partial_output(output_path: Path) -> None:
+    output_path.unlink(missing_ok=True)
