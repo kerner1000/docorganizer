@@ -1,6 +1,6 @@
 # Document Archive
 <!-- Inherits global rules from ~/.claude/CLAUDE.md -->
-<!-- Copy this template into your archive directory as CLAUDE.md and adapt it. -->
+<!-- Copy this file (template-claude.md) into your archive directory as CLAUDE.md and adapt it. -->
 
 ---
 
