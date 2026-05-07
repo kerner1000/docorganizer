@@ -452,6 +452,40 @@ class TestNormalizeDocumentTypeTopic:
         assert len(issues) == 1
         assert p.topic == "Invoice"
 
+    # Annual statement exception (German Jahresabrechnung) --------------------
+
+    def test_annual_statement_with_year_preserved(self):
+        p = _make_proposal(topic="Annual statement 2025")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Annual statement 2025"
+
+    def test_annual_statement_earlier_year(self):
+        p = _make_proposal(topic="Annual statement 2021")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Annual statement 2021"
+
+    def test_annual_statement_casing_normalized(self):
+        p = _make_proposal(topic="ANNUAL STATEMENT 2025")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert issues[0].field == "topic"
+        assert issues[0].severity == "fixed"
+        assert p.topic == "Annual statement 2025"
+
+    def test_bare_statement_with_year_still_bare(self):
+        # Plain 'Statement 2025' (no 'Annual' qualifier) is already a bare type
+        # with a period suffix and should remain unchanged.
+        p = _make_proposal(topic="Statement 2025")
+        assert _normalize_document_type_topic(p) == []
+        assert p.topic == "Statement 2025"
+
+    def test_annual_statement_without_year_stripped(self):
+        # No accounting year — falls back to the bare-type rule.
+        p = _make_proposal(topic="Annual Statement")
+        issues = _normalize_document_type_topic(p)
+        assert len(issues) == 1
+        assert p.topic == "Statement"
+
 
 # ── _check_tags_valid ────────────────────────────────────────────────────────
 

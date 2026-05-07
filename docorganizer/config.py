@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from docorganizer.charset import FilenameCharset
+
 
 CONFIG_FILENAME = "docorganizer.yaml"
 
@@ -79,6 +81,9 @@ class ArchiveConfig:
 
     # Deterministic routing overrides applied after LLM classification
     business_routing: list[BusinessRoutingRule] = field(default_factory=list)
+
+    # Charset enforcement for paths (filenames + folder segments). See ADR-0009.
+    filename_charset: FilenameCharset = field(default_factory=FilenameCharset.default)
 
     @property
     def use_person(self) -> bool:
@@ -197,6 +202,16 @@ def load_config(archive_root: Path) -> ArchiveConfig:
         for r in raw.get("business_routing", [])
     ]
 
+    cs = raw.get("filename_charset")
+    if cs is None:
+        filename_charset = FilenameCharset.default()
+    else:
+        filename_charset = FilenameCharset(
+            transliterate=dict(cs.get("transliterate", {})),
+            strip_remaining_diacritics=cs.get("strip_remaining_diacritics", True),
+            enforce_ascii=cs.get("enforce_ascii", True),
+        )
+
     return ArchiveConfig(
         name=raw["name"],
         root_folder=raw.get("root_folder"),
@@ -214,4 +229,5 @@ def load_config(archive_root: Path) -> ArchiveConfig:
         translation_sources=translation.get("source_languages", []),
         business_routing=business_routing,
         non_archive_dir=raw.get("non_archive_dir"),
+        filename_charset=filename_charset,
     )

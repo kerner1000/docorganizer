@@ -13,6 +13,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from docorganizer.charset import path_to_ascii, to_ascii
 from docorganizer.config import ArchiveConfig, date_to_subfolder
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -383,6 +384,9 @@ _DOCUMENT_TYPE_WORDS: tuple[tuple[str, str], ...] = (
 _PERIOD_SUFFIX = r"\s+\d[\d\-]*"
 
 
+_ANNUAL_STATEMENT_PATTERN = re.compile(r"^annual\s+statement\s+(\d{4})$", re.IGNORECASE)
+
+
 def _normalize_document_type_topic(proposal) -> list[Issue]:
     """Strip descriptive qualifiers from common document-type topics.
 
@@ -398,9 +402,27 @@ def _normalize_document_type_topic(proposal) -> list[Issue]:
     'Purchase contract', not 'Contract').
 
     The Sender field already provides context; topics should not duplicate it.
+
+    Exception: 'Annual statement YYYY' (German Jahresabrechnung) keeps the
+    'Annual' qualifier and the accounting year — the year is the document's
+    primary identifier, since the issue date is typically the following year.
     """
     issues = []
     topic = proposal.topic
+
+    annual_match = _ANNUAL_STATEMENT_PATTERN.match(topic)
+    if annual_match:
+        canonical = f"Annual statement {annual_match.group(1)}"
+        if topic != canonical:
+            issues.append(Issue(
+                field="topic",
+                severity="fixed",
+                old_value=topic,
+                new_value=canonical,
+                reason=f"Normalized casing to '{canonical}'",
+            ))
+            proposal.topic = canonical
+        return issues
 
     for type_lower, canonical in _DOCUMENT_TYPE_WORDS:
         # Match "<canonical>" or "<canonical> <period>" as the entire topic,
@@ -479,6 +501,55 @@ def sanitize_field(value: str) -> str:
     return cleaned
 
 
+def _check_charset(proposal, config: ArchiveConfig) -> list[Issue]:
+    """Enforce ASCII-only paths via language-aware transliteration (ADR-0009).
+
+    Catches non-ASCII bytes in any field that lands on disk — including
+    fields a user may have edited in proposals.json after the LLM step. Auto-
+    fixes by transliterating in place.
+    """
+    cs = config.filename_charset
+    issues: list[Issue] = []
+
+    field_specs = [
+        ("sender", to_ascii),
+        ("topic", to_ascii),
+        ("country", to_ascii),
+        ("folder_topic", path_to_ascii),
+        ("target_folder", path_to_ascii),
+        ("disambiguator", to_ascii),
+        ("filename_override", to_ascii),
+    ]
+    if proposal.person:
+        field_specs.append(("person", to_ascii))
+
+    for name, fn in field_specs:
+        old = getattr(proposal, name, None)
+        if not old:
+            continue
+        try:
+            new = fn(old, cs)
+        except ValueError as e:
+            issues.append(Issue(
+                field=name,
+                severity="review",
+                old_value=old,
+                new_value=old,
+                reason=f"ASCII enforcement failed: {e}",
+            ))
+            continue
+        if new != old:
+            setattr(proposal, name, new)
+            issues.append(Issue(
+                field=name,
+                severity="fixed",
+                old_value=old,
+                new_value=new,
+                reason="Transliterated to ASCII per filename_charset",
+            ))
+    return issues
+
+
 def _check_path_unsafe_chars(proposal) -> list[Issue]:
     """Auto-fix path-unsafe characters (``/``, ``\\``, NUL) in filename fields.
 
@@ -534,6 +605,7 @@ def validate_proposals(
         issues.extend(_check_tags_valid(p, config))
         issues.extend(_check_filename_separators(p))
         issues.extend(_check_path_unsafe_chars(p))
+        issues.extend(_check_charset(p, config))
         if issues:
             all_issues[i] = issues
 

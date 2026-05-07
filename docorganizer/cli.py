@@ -27,6 +27,7 @@ import anthropic
 import xattr as xattr_lib
 from dotenv import load_dotenv
 
+from docorganizer.charset import path_to_ascii, to_ascii
 from docorganizer.config import ArchiveConfig, ArchiveContext, date_to_subfolder, load_config
 from docorganizer.extractor import (
     SUPPORTED_EXTENSIONS,
@@ -658,6 +659,16 @@ def _build_proposal(
     folder_topic = data.get("folder_topic", "Unsorted")
     tags = [t for t in data.get("tags", []) if t in config.controlled_tags]
 
+    # Charset (ADR-0009): transliterate every field that lands on the filesystem
+    # before assembling target_folder/filename, so the LLM never has to know
+    # about the ASCII rule.
+    cs = config.filename_charset
+    sender = to_ascii(data["sender"], cs)
+    topic = to_ascii(data["topic"], cs)
+    person = to_ascii(data.get("person", ""), cs)
+    country = to_ascii(country, cs)
+    folder_topic = path_to_ascii(folder_topic, cs)
+
     prefix = config.root_folder_prefix
     if country:
         target_folder = f"{prefix}{country}/{folder_topic}"
@@ -676,6 +687,8 @@ def _build_proposal(
     disambiguator = data.get("disambiguator")
     if isinstance(disambiguator, str):
         disambiguator = disambiguator.strip() or None
+        if disambiguator:
+            disambiguator = to_ascii(disambiguator, cs)
 
     non_archive_reason = data.get("non_archive_reason")
     if isinstance(non_archive_reason, str):
@@ -694,9 +707,9 @@ def _build_proposal(
 
     return Proposal(
         original_path=path,
-        sender=data["sender"],
-        topic=data["topic"],
-        person=data.get("person", ""),
+        sender=sender,
+        topic=topic,
+        person=person,
         date=data["date"],
         country=country,
         folder_topic=folder_topic,
@@ -870,15 +883,16 @@ def apply_business_routing(proposal: Proposal, text: str, config: ArchiveConfig)
     rule = _match_business_routing(text, config)
     if rule is None:
         return None
-    proposal.target_folder = rule.target_folder
-    proposal.folder_topic = rule.target_folder.rsplit("/", 1)[-1]
+    cs = config.filename_charset
+    proposal.target_folder = path_to_ascii(rule.target_folder, cs)
+    proposal.folder_topic = proposal.target_folder.rsplit("/", 1)[-1]
     for tag in rule.append_tags:
         if tag not in proposal.tags:
             proposal.tags.append(tag)
     if rule.override_person:
-        proposal.person = rule.override_person
+        proposal.person = to_ascii(rule.override_person, cs)
     if rule.override_sender:
-        proposal.sender = rule.override_sender
+        proposal.sender = to_ascii(rule.override_sender, cs)
     return rule.name
 
 
@@ -1200,7 +1214,7 @@ def execute_all(
         # rename so a bad proposal that slipped past the validator can't abort
         # the whole batch. The validator should have caught this already —
         # this is a belt-and-braces guard.
-        _sanitize_proposal_fields(p)
+        _sanitize_proposal_fields(p, ctx.config)
 
         target_dir = ctx.root / p.target_folder
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1286,12 +1300,13 @@ def execute_all(
     return executed
 
 
-def _sanitize_proposal_fields(p: Proposal) -> None:
+def _sanitize_proposal_fields(p: Proposal, config: ArchiveConfig) -> None:
     """In-place strip of path-unsafe chars from filename fields.
 
     Mirrors validator._check_path_unsafe_chars but without producing Issues —
     a last-line-of-defence before the rename call so a raw '/' in a sender
-    can't be interpreted as a directory separator by pathlib.
+    can't be interpreted as a directory separator by pathlib. Also enforces
+    the ASCII charset rule (ADR-0009).
     """
     p.sender = sanitize_field(p.sender)
     p.topic = sanitize_field(p.topic)
@@ -1299,6 +1314,20 @@ def _sanitize_proposal_fields(p: Proposal) -> None:
         p.person = sanitize_field(p.person)
     if p.filename_override:
         p.filename_override = sanitize_field(p.filename_override)
+
+    cs = config.filename_charset
+    p.sender = to_ascii(p.sender, cs)
+    p.topic = to_ascii(p.topic, cs)
+    if p.person:
+        p.person = to_ascii(p.person, cs)
+    if p.filename_override:
+        p.filename_override = to_ascii(p.filename_override, cs)
+    if p.disambiguator:
+        p.disambiguator = to_ascii(p.disambiguator, cs)
+    if p.target_folder:
+        p.target_folder = path_to_ascii(p.target_folder, cs)
+    if p.folder_topic:
+        p.folder_topic = path_to_ascii(p.folder_topic, cs)
 
 
 # ── Step 6: REPORT ───────────────────────────────────────────────────────────
@@ -1516,6 +1545,88 @@ def write_refactor_log(
         ctx.intake_log.write_text(new_entry)
 
 
+# ── Charset migration (ADR-0009) ─────────────────────────────────────────────
+
+
+def _charset_migration_plan(ctx: ArchiveContext) -> list[tuple[Path, Path]]:
+    """Build a list of (old, new) paths whose ASCII form differs from current.
+
+    Walks the filing root and the ToDo folder, skipping inbox / _archive and
+    hidden entries. Returns a deepest-first list so renames execute children
+    before parents (renaming a folder first would invalidate paths to the
+    files still inside it).
+    """
+    cs = ctx.config.filename_charset
+    skip_names = {ctx.config.inbox_dir, ctx.config.archive_dir}
+
+    roots: list[Path] = []
+    if ctx.root_folder.exists():
+        roots.append(ctx.root_folder)
+    if ctx.todo.exists() and ctx.todo not in roots:
+        roots.append(ctx.todo)
+
+    pairs: list[tuple[Path, Path]] = []
+    for root in roots:
+        for path in root.rglob("*"):
+            if path.name.startswith("."):
+                continue
+            if any(part in skip_names for part in path.relative_to(ctx.root).parts):
+                continue
+            new_name = to_ascii(path.name, cs)
+            if new_name == path.name:
+                continue
+            pairs.append((path, path.with_name(new_name)))
+
+    # Deepest-first: rename files before their parent folders.
+    pairs.sort(key=lambda pair: len(pair[0].parts), reverse=True)
+    return pairs
+
+
+def migrate_charset(ctx: ArchiveContext, *, apply: bool) -> None:
+    """Bring the existing archive into ASCII compliance.
+
+    Without ``--apply`` prints a dry-run table. With ``--apply`` performs the
+    renames and appends a refactor entry to the intake log.
+    """
+    print("── Migrate charset (ADR-0009) ──────────────────────────────")
+    plan = _charset_migration_plan(ctx)
+
+    if not plan:
+        print("  All paths already ASCII — nothing to do.")
+        return
+
+    print(f"  {len(plan)} path(s) need migration:\n")
+    for old, new in plan:
+        rel_old = old.relative_to(ctx.root)
+        rel_new = new.relative_to(ctx.root)
+        print(f"    {rel_old}")
+        print(f"      → {rel_new}")
+    print()
+
+    if not apply:
+        print("  (dry run — pass --apply to perform the renames)")
+        return
+
+    moves: list[RefactorMove] = []
+    for old, new in plan:
+        # A sibling path already exists at the target — skip and report.
+        # ``new == old`` is impossible here (filtered out in the plan).
+        if new.exists() and new.resolve() != old.resolve():
+            print(f"  SKIP: {new.relative_to(ctx.root)} already exists — leaving {old.name} as-is")
+            continue
+        try:
+            old.rename(new)
+            moves.append(RefactorMove(source=old, target=new))
+            print(f"  Moved: {old.relative_to(ctx.root)} → {new.relative_to(ctx.root)}")
+        except OSError as e:
+            print(f"  ERROR: {old.relative_to(ctx.root)} — {e}")
+
+    if moves:
+        batch_id = next_batch_id(ctx)
+        write_refactor_log(batch_id, moves, ctx)
+        print(f"\n  Migrated {len(moves)} path(s). Intake log entry: {batch_id}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -1640,6 +1751,12 @@ def main() -> None:
     # Refresh MODEL after dotenv
     global MODEL
     MODEL = os.getenv("DOCORG_MODEL", "claude-haiku-4-5-20251001")
+
+    # --migrate-charset [--apply]
+    if "--migrate-charset" in args:
+        apply = "--apply" in args
+        migrate_charset(ctx, apply=apply)
+        return
 
     # --refactor --match PATTERN --to FOLDER
     if "--refactor" in args:
