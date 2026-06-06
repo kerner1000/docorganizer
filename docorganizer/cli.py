@@ -621,10 +621,25 @@ DOCUMENT TEXT:
 {text}"""
 
 
+def _sanitize_auth_env() -> None:
+    """Drop an empty ANTHROPIC_AUTH_TOKEN so the SDK falls back to the api_key.
+
+    Claude Desktop injects ``ANTHROPIC_AUTH_TOKEN=""`` into the environment.
+    The Anthropic SDK treats the token as *set*, prefers Bearer auth over the
+    valid ``sk-ant-...`` api_key, and emits ``Authorization: Bearer `` (empty).
+    httpcore rejects that as an illegal header value, which the SDK wraps as a
+    generic ``APIConnectionError`` ("Connection error.") — masquerading as a
+    network failure. Removing the empty token restores api_key-based auth.
+    """
+    if not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
+
 def _call_claude(
     text: str, existing_structure: dict, config: ArchiveConfig,
 ) -> dict:
     """Send document text to Claude and parse the structured response."""
+    _sanitize_auth_env()
     client = anthropic.Anthropic()
 
     prompt = _build_prompt(text, existing_structure, config)
@@ -1747,6 +1762,10 @@ def main() -> None:
 
     # Load .env from archive root
     load_dotenv(dotenv_path=archive_root / ".env", override=True)
+
+    # Strip an empty ANTHROPIC_AUTH_TOKEN injected by Claude Desktop so the SDK
+    # falls back to the api_key from .env (see _sanitize_auth_env).
+    _sanitize_auth_env()
 
     # Refresh MODEL after dotenv
     global MODEL
